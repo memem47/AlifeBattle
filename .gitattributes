@@ -1,0 +1,9 @@
+# Normalize text files
+* text=auto
+
+# Keep source and documentation files as LF
+*.py  text eol=lf
+*.txt text eol=lf
+*.md  text eol=lf
+*.yml text eol=lf
+*.yaml text eol=lf
