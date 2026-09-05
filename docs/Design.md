@@ -1,287 +1,214 @@
 # AlifeBattle Design Document
 
-## 1. Overview
+## 1. Purpose
 
-AlifeBattle is a real-time many-versus-many combat simulation in which individual agents make decisions based primarily on local information.
+AlifeBattle is a real-time many-agent combat simulation intended to explore artificial life, emergent collective behavior, and large-scale agent simulation.
 
-The initial target scale is:
+The system does not primarily aim to implement sophisticated military tactics directly.
 
-* 1,000 agents vs. 1,000 agents
-* Approximately 2,000 simultaneously active agents
-* Real-time graphical visualization using Pygame
+Instead, it assigns simple local rules and individual traits to autonomous agents and observes the resulting global behavior.
 
-The main goal is not to directly program high-level military tactics. Instead, the system is intended to explore whether behaviors such as front-line formation, encirclement, retreat, concentration of forces, and coordinated movement can emerge from relatively simple local rules.
+The long-term research question is:
 
-The project is also intended as a learning platform for real-time simulation, artificial life, optimization, spatial algorithms, and emergent behavior.
+> Can recognizable collective tactics emerge from simple local agent behavior without explicitly programming those tactics?
 
-## 2. Objectives
+## 2. Current Scope
 
-### 2.1 Functional Objectives
+The current prototype supports:
 
-The system should:
+* configurable RED and BLUE armies
+* approximately 2,000 agents by default
+* independent individual traits
+* local enemy detection
+* local numerical-balance evaluation
+* target pursuit
+* crowding avoidance
+* retreat behavior
+* melee combat
+* randomly generated obstacles
+* spatial partitioning
+* real-time Pygame visualization
+* GUI parameter editing
 
-* Simulate approximately 2,000 agents in real time.
-* Represent each soldier as an independent agent.
-* Allow agents to make decisions based on nearby information.
-* Support differences in physical ability and behavioral tendencies between agents.
-* Visualize movement, combat, casualties, and battle progress.
-* Provide a structure that can later support unit types, morale, commanders, terrain, communication, and evolution.
+The current implementation remains in a single Python source file.
 
-### 2.2 Engineering Objectives
+## 3. System Layout
 
-The project should provide practical experience with:
-
-* Python application design
-* Object-oriented design
-* Real-time game loops
-* Spatial partitioning
-* Performance profiling
-* Algorithm optimization
-* Artificial-life systems
-* Emergent behavior
-* Evolutionary algorithms
-* NumPy, Numba, and potentially GPU computation
-
-## 3. Design Principles
-
-### 3.1 Avoid Centralized Control
-
-The simulation should not directly specify the movement of every soldier from a central controller.
-
-A central system may eventually provide high-level objectives, but individual movement and combat decisions should remain agent-based.
-
-### 3.2 Prefer Local Information
-
-Agents should normally make decisions using information available within their perception range.
-
-This allows imperfect information and local interactions to produce complex global behavior.
-
-### 3.3 Start with Simple Rules
-
-Complex tactics should not initially be hard-coded.
-
-Instead, behavior should emerge from combinations of simple forces such as:
-
-* attraction toward enemies
-* cohesion with allies
-* separation from nearby agents
-* retreat from unfavorable situations
-* behavioral randomness
-
-### 3.4 Separate Simulation from Rendering
-
-The simulation engine should not depend on graphical rendering.
-
-This is important because future evolutionary experiments may require thousands of battles to run without displaying them.
-
-### 3.5 Measure Before Optimizing
-
-Performance improvements should be based on profiling results rather than assumptions.
-
-## 4. High-Level Architecture
+The window consists of four main areas.
 
 ```text
-Game
++------------+--------------------------+------------+
+| RED config |                          | BLUE config|
+|            |       Battlefield        |            |
+|            |                          |            |
++------------+--------------------------+------------+
+|               Common parameters                    |
++----------------------------------------------------+
+```
+
+The battlefield size is currently:
+
+```text
+WORLD_WIDTH  = 700
+WORLD_HEIGHT = 552
+```
+
+The vertical size is approximately 1.3 times the earlier prototype.
+
+## 4. Logical Architecture
+
+Although the prototype is currently implemented in one file, the logical structure is:
+
+```text
+Application
+├─ Configuration
+│  ├─ TeamConfig
+│  └─ CommonConfig
 ├─ Simulation
 │  ├─ Agent
-│  ├─ Team
-│  ├─ SpatialGrid
-│  ├─ CombatSystem
-│  └─ World
-├─ Renderer
-├─ InputController
-└─ Statistics
+│  ├─ BattleSimulation
+│  └─ SpatialGrid
+├─ Environment
+│  └─ Obstacles
+├─ UI
+│  └─ InputField
+└─ Rendering
+   ├─ Battlefield
+   ├─ Agents
+   ├─ Obstacles
+   └─ Parameter panels
 ```
 
-The first prototype may keep several responsibilities in a single Python file, but the logical responsibilities should remain separated.
+These logical responsibilities should eventually be separated into modules.
 
-## 5. Game
+## 5. Configuration Model
 
-The `Game` component manages the overall application lifecycle.
+### 5.1 TeamConfig
 
-Responsibilities:
-
-* initialization
-* main loop
-* input processing
-* simulation update
-* rendering
-* termination
-
-Conceptually:
+Each army has its own `TeamConfig`.
 
 ```python
-while running:
-    process_input()
-    simulation.update(dt)
-    renderer.draw()
+@dataclass
+class TeamConfig:
+    values: dict
 ```
 
-`Game` should not contain detailed agent decision logic.
-
-## 6. Simulation
-
-The `Simulation` component owns and updates the world state.
-
-Responsibilities:
-
-* managing agents
-* rebuilding or updating the spatial grid
-* updating agents
-* processing combat
-* processing deaths
-* checking victory conditions
-* updating statistics
-
-Typical update sequence:
+The configurable agent traits are:
 
 ```text
-1. Update spatial partition
-2. Gather local information
-3. Decide agent actions
-4. Update movement
-5. Resolve attacks
-6. Update hit points
-7. Process deaths
-8. Update statistics
+max_hp
+speed
+damage
+attack_interval
+perception
+aggression
+courage
 ```
 
-A future implementation should separate decision calculation from state application to reduce update-order bias.
+RED and BLUE can use different distributions.
 
-## 7. Agent
+### 5.2 Distribution Representation
 
-An `Agent` represents one soldier.
+The GUI represents each trait distribution using:
 
-### 7.1 Basic State
+```text
+center
+width
+```
 
-Typical state:
+During `APPLY + RESET`, these are converted to:
+
+```text
+minimum = center - width / 2
+maximum = center + width / 2
+```
+
+Each new agent samples its trait using a continuous uniform distribution:
 
 ```python
-id
+random.uniform(minimum, maximum)
+```
+
+The current model therefore assumes no normal distribution or cross-trait correlation.
+
+### 5.3 CommonConfig
+
+Current common configuration:
+
+```python
+@dataclass
+class CommonConfig:
+    red_team_size: int
+    blue_team_size: int
+    cell_size: int
+    separation_radius: float
+    melee_range: float
+    local_balance_radius: float
+```
+
+`red_team_size` and `blue_team_size` can be independently configured.
+
+## 6. Agent Model
+
+Each `Agent` represents one soldier.
+
+### 6.1 State
+
+Current state includes:
+
+```text
 team
 position
 velocity
-hp
-max_hp
 alive
+hp
+target
+attack cooldown
+retarget timer
+retreating
 ```
 
-### 7.2 Physical and Combat Parameters
+### 6.2 Individual Traits
 
-Examples:
+Each agent also stores:
 
-```python
+```text
+max_hp
 speed
-attack_power
-attack_range
+damage
 attack_interval
-vision_range
+perception
+aggression
+courage
 ```
 
-### 7.3 Behavioral Parameters
+These are fixed when the agent is generated.
 
-Possible behavioral parameters:
+Changing GUI values does not alter existing agents. New values take effect after the simulation is reset.
 
-```python
-aggressiveness
-bravery
-cohesion
-caution
-```
+### 6.3 Memory Optimization
 
-Examples:
+`Agent` uses `__slots__`.
 
-* High `aggressiveness`: stronger tendency to approach enemies.
-* Low `bravery`: earlier retreat under disadvantage.
-* High `cohesion`: stronger tendency to remain near allies.
-* High `caution`: stronger avoidance of locally dangerous situations.
+This reduces per-object attribute overhead compared with standard Python instances.
 
-These parameters may later become part of an evolvable genome.
+This is useful for thousands of agents, although future larger simulations may require a data-oriented representation using arrays.
 
-## 8. Agent Behavior Model
+## 7. SpatialGrid
 
-An agent's movement vector can be modeled as the combination of several behavioral forces.
+### 7.1 Purpose
+
+A naive neighborhood search can approach:
 
 ```text
-Movement =
-    EnemyAttraction
-  + AllyCohesion
-  + Separation
-  + Retreat
-  + Noise
+N × N
 ```
 
-### 8.1 Enemy Attraction
+comparisons.
 
-Agents move toward selected enemy targets.
+For approximately 2,000 agents, this could result in millions of pair checks.
 
-Initially, the nearest visible enemy may be used.
-
-Later versions may use a target evaluation function.
-
-### 8.2 Ally Cohesion
-
-Agents tend to remain reasonably close to nearby allies.
-
-This is conceptually similar to cohesion behavior in Boids.
-
-### 8.3 Separation
-
-Agents avoid occupying the same physical location.
-
-Repulsive force should increase as distance decreases.
-
-### 8.4 Retreat
-
-Agents may retreat when local conditions become unfavorable.
-
-Possible inputs include:
-
-* low HP
-* local numerical disadvantage
-* low morale
-* nearby ally deaths
-* commander death
-
-The initial implementation may use only HP and the local ally-to-enemy ratio.
-
-### 8.5 Noise
-
-Small random movement components prevent all agents from behaving identically.
-
-Noise may also help avoid overly stable or artificial-looking battle lines.
-
-## 9. Target Selection
-
-The initial implementation may select the nearest enemy within perception range.
-
-Future versions can use a score such as:
-
-```text
-TargetScore =
-    distance
-  + target HP
-  + target type
-  + nearby allies
-  + threat level
-```
-
-The exact scoring function should remain replaceable.
-
-## 10. SpatialGrid
-
-### 10.1 Purpose
-
-A naive all-to-all search for 2,000 agents can require approximately:
-
-```text
-2,000 × 2,000
-= 4,000,000
-```
-
-pair comparisons.
-
-To reduce this cost, the battlefield is divided into spatial cells.
+The battlefield is therefore divided into spatial cells.
 
 ```text
 +----+----+----+
@@ -293,527 +220,779 @@ To reduce this cost, the battlefield is divided into spatial cells.
 +----+----+----+
 ```
 
-Agents search only their current cell and nearby cells.
-
-### 10.2 Data Structure
-
-Example:
+### 7.2 Data Structure
 
 ```python
-grid[(cell_x, cell_y)] = [agent1, agent2, ...]
+cells[(cell_x, cell_y)] = [agents...]
 ```
 
-### 10.3 Processing
+Only living agents are inserted.
+
+### 7.3 Neighborhood Query
+
+`nearby(position, radius)` identifies all cells whose area may overlap the query radius and yields their agents.
+
+Exact distance filtering is performed by the calling logic.
+
+### 7.4 Grid Rebuilding
+
+The current implementation rebuilds the spatial grid once at the beginning of every simulation update.
+
+Agents then move during the same update without rebuilding the grid until the next frame.
+
+This is an approximation that should be considered when improving simulation consistency.
+
+## 8. Army Generation
+
+RED and BLUE armies start from opposite sides.
+
+Approximate spawn centers:
 
 ```text
-Agent position
-↓
-Calculate cell coordinates
-↓
-Register agent in grid
-↓
-Search nearby cells only
+RED  x = 130
+BLUE x = WORLD_WIDTH - 130
 ```
 
-### 10.4 Cell Size
+Agents are arranged in broad formations with small positional jitter.
 
-The initial prototype uses approximately:
+Current spacing:
 
 ```text
-CELL_SIZE = 48
+spacing_x = 6
+spacing_y = 6
 ```
 
-The appropriate value should later be determined experimentally based on:
+Agent placement avoids obstacle cells where possible.
 
-* vision range
-* combat range
-* agent density
-* profiling results
+If the initial position is obstructed, the code first tries displacement along Y and then along X.
 
-## 11. CombatSystem
+Placement attempts are bounded.
 
-An attack occurs when:
+## 9. Obstacle Generation
+
+### 9.1 Representation
+
+Obstacles are represented as grid-cell coordinates:
+
+```python
+obstacle_cells = set[(cell_x, cell_y)]
+```
+
+Each obstacle therefore occupies one complete spatial-grid cell.
+
+### 9.2 Cluster Generation
+
+At reset:
+
+1. A number of obstacle clusters is determined from battlefield area.
+2. A random cluster target size between 3 and 12 cells is selected.
+3. A valid seed cell is searched for.
+4. The cluster grows using random four-connected neighbors.
+
+### 9.3 Spawn Protection
+
+Obstacle seed and growth positions are prevented from entering protected X regions around the two army spawn centers.
+
+Current protection width:
 
 ```text
-distance_to_target <= attack_range
+spawn_margin = 5 × cell_size
+```
+
+### 9.4 Infinite-Loop Protection
+
+Both seed search and cluster growth use bounded attempts.
+
+Seed search:
+
+```text
+maximum 200 attempts
+```
+
+Cluster growth:
+
+```text
+maximum attempts = cluster_size × 50
+```
+
+If no seed is found, the cluster is skipped.
+
+If a cluster cannot reach its requested size, the partially generated cluster is accepted.
+
+This prevents random obstacle generation from hanging indefinitely.
+
+## 10. Simulation Update
+
+Current frame update:
+
+```text
+1. Increase elapsed simulation time
+2. Rebuild SpatialGrid
+3. Compute RED and BLUE centers
+4. Iterate over all agents
+   4.1 Update cooldowns
+   4.2 Retarget if required
+   4.3 Evaluate local numerical balance
+   4.4 Calculate movement vector
+   4.5 Smooth velocity
+   4.6 Move while avoiding obstacle cells
+   4.7 Attempt attack
+```
+
+This is currently a sequential update model.
+
+## 11. Target Acquisition
+
+Agents periodically search for enemies.
+
+The search is staggered using a randomized timer so that all agents do not perform expensive target searches in the same frame.
+
+Typical interval:
+
+```text
+0.18–0.42 seconds
+```
+
+The target is currently:
+
+> the nearest living enemy inside the agent's perception range.
+
+Perception is an individual agent trait.
+
+## 12. Strategic Direction
+
+When an agent has no valid detected target, it moves approximately toward the center of the opposing army.
+
+```text
+RED  → BLUE center
+BLUE → RED center
+```
+
+This provides a coarse global strategic bias.
+
+It means the current system is not yet based purely on locally perceived information.
+
+A future design may remove or replace this global knowledge.
+
+## 13. Local Balance
+
+Local force balance is evaluated separately from perception.
+
+```text
+Agent perception
+= range used to detect target enemies
+
+Local balance radius
+= radius used to estimate nearby allies and enemies
+```
+
+The local balance radius is a common simulation parameter.
+
+This separation makes the meaning of the two concepts explicit.
+
+## 14. Movement Model
+
+The movement vector combines several influences:
+
+```text
+Movement =
+    Target direction
+  + Separation
+  + Lateral variation
+```
+
+Retreat may replace the normal target direction.
+
+### 14.1 Target Direction
+
+If a target exists:
+
+```text
+Agent → target
+```
+
+If the target is already within approximately melee distance, direct forward movement is reduced.
+
+If no target exists:
+
+```text
+Agent → enemy army center
+```
+
+### 14.2 Aggression
+
+The target component is weighted by aggression.
+
+Conceptually:
+
+```text
+high aggression
+→ enemy direction receives greater relative weight
+
+low aggression
+→ other movement influences have more effect
+```
+
+Aggression does not directly increase the agent's maximum speed.
+
+### 14.3 Separation
+
+Agents repel nearby agents when they are inside the configured separation radius.
+
+The force increases at shorter distances.
+
+The current rule does not distinguish friend from foe for physical separation.
+
+### 14.4 Lateral Variation
+
+A sinusoidal perpendicular component is added to reduce one-dimensional movement and produce a less rigid battle front.
+
+This component currently depends on world position and elapsed time.
+
+## 15. Retreat Model
+
+Retreat is not currently a persistent finite-state transition.
+
+Instead, retreat is recalculated every update.
+
+```text
+FIGHT / ADVANCE
+       ⇅
+RETREAT
+```
+
+An agent retreats if either:
+
+### Condition A: Local Numerical Disadvantage
+
+```text
+local enemies > max(2, local allies × 1.55)
 AND
-attack_cooldown <= 0
+courage < 0.55
 ```
 
-Example:
+### Condition B: Heavy Injury
+
+An agent retreats when its HP ratio falls below a courage-dependent threshold.
+
+Lower-courage agents therefore become willing to retreat at higher HP.
+
+### Retreat Direction
+
+If a valid target exists:
+
+```text
+move away from target
+```
+
+Otherwise:
+
+```text
+move toward own rear area
+```
+
+The boolean:
 
 ```python
-target.hp -= attacker.attack_power
-attacker.cooldown = attacker.attack_interval
+agent.retreating
 ```
 
-When:
+is stored primarily so rendering can distinguish retreating agents.
 
-```python
-target.hp <= 0
+A future version may replace this with an explicit state machine such as:
+
+```text
+ADVANCE
+FIGHT
+RETREAT
+RECOVER
+ROUT
 ```
 
-the target is marked as dead.
+## 16. Combat
 
-Future combat models may support:
+Agents attack only a currently selected target.
 
-* projectiles
-* armor
-* accuracy
-* ranged combat
-* suppression
-* directional attacks
+Attack condition:
 
-## 12. Team
-
-A `Team` represents a group of allied agents.
-
-Initial responsibilities:
-
-```python
-id
-members
-spawn_area
+```text
+distance <= melee_range + attacker radius + target radius
+AND
+attack cooldown <= 0
 ```
 
-Future responsibilities may include:
+Damage:
 
-```python
-commander
-global_morale
-objective
-strategy
+```text
+agent.damage × random factor
 ```
 
-The team should provide high-level context rather than directly controlling every soldier.
+The random damage multiplier currently ranges approximately from:
 
-## 13. Rendering
+```text
+0.82 to 1.18
+```
 
-The `Renderer` is responsible only for visualization.
+After attacking, the cooldown is reset to the agent's attack interval.
 
-Initial visualization:
+If HP reaches zero:
 
-* Team A: one color
-* Team B: another color
-* dead agents: dark markers
+```text
+alive = False
+velocity = 0
+target = None
+```
 
-The interface should display:
+## 17. Obstacle Collision
 
-* surviving agents per team
-* FPS
-* simulation speed
-* pause state
-* battle result
+Before applying movement, the simulation checks whether the desired destination lies in an obstacle cell.
 
-Rendering logic should remain separate from simulation behavior.
+If blocked:
 
-## 14. Input Controls
+```text
+1. Try X-only movement
+2. Otherwise try Y-only movement
+3. Otherwise heavily damp velocity
+```
 
-Initial controls:
+This is reactive obstacle avoidance.
 
-| Key   | Action                    |
+The agent does not currently plan a route around obstacles.
+
+Therefore agents can become inefficient or temporarily stuck around complex obstacle structures.
+
+## 18. Update-Order Limitation
+
+The current simulation updates agents sequentially.
+
+Because RED agents are spawned before BLUE agents, the list normally contains:
+
+```text
+RED agents
+then
+BLUE agents
+```
+
+Therefore RED agents are normally processed first in each frame.
+
+Movement and damage are applied immediately.
+
+This creates possible update-order bias.
+
+For example:
+
+```text
+RED attacks BLUE
+→ BLUE dies
+→ BLUE's later update is skipped
+```
+
+while BLUE may observe already-updated RED positions later in the same frame.
+
+The current design therefore cannot guarantee strict RED/BLUE symmetry.
+
+A future simulation update should use a staged model:
+
+```text
+Phase 1: Observe
+Phase 2: Decide
+Phase 3: Apply movement
+Phase 4: Calculate attacks
+Phase 5: Apply damage simultaneously
+```
+
+This is a high-priority architectural improvement.
+
+## 19. Rendering
+
+### 19.1 Living Agents
+
+Living agents are drawn as triangles.
+
+Orientation is determined from velocity.
+
+If velocity is nearly zero:
+
+```text
+RED  faces right
+BLUE faces left
+```
+
+### 19.2 Retreat Visualization
+
+Retreating agents use distinct colors.
+
+This allows retreat behavior to be observed visually.
+
+### 19.3 Agent Size
+
+Triangle size is derived from a composite normalized strength measure based on:
+
+```text
+HP capacity
+Speed
+Damage
+Attack interval
+Perception
+Aggression
+Courage
+```
+
+For attack interval, a lower value is treated as stronger.
+
+Agents are grouped into three visual tiers.
+
+This size is currently a visualization feature and does not itself change combat physics.
+
+### 19.4 Dead Agents
+
+Dead agents remain visible as small dark team-colored markers.
+
+## 20. User Interface
+
+### 20.1 InputField
+
+`InputField` supports:
+
+* text entry
+* backspace
+* Enter
+* Escape
+* mouse up arrow
+* mouse down arrow
+* parameter-specific step size
+
+### 20.2 Team Parameters
+
+Each team panel supports:
+
+```text
+Team size
+
+Trait             center   width
+HP
+Speed
+Damage
+Attack
+Perception
+Aggression
+Courage
+```
+
+### 20.3 Common Parameters
+
+Current common controls:
+
+```text
+Cell size
+Separation
+Melee range
+Local balance
+```
+
+### 20.4 Apply Behavior
+
+GUI edits are not automatically applied to the running simulation.
+
+`APPLY + RESET`:
+
+1. validates fields
+2. converts center/width to min/max
+3. updates configuration objects
+4. rebuilds the simulation
+5. regenerates agents and obstacles
+
+## 21. Simulation Controls
+
+Keyboard:
+
+| Key   | Function                  |
 | ----- | ------------------------- |
-| Space | Pause / resume            |
-| R     | Restart                   |
-| G     | Toggle spatial grid       |
+| Space | Pause / play              |
+| R     | Reset                     |
+| G     | Grid on/off               |
 | +     | Increase simulation speed |
 | -     | Decrease simulation speed |
 | Esc   | Exit                      |
 
-## 15. Time Management
+Mouse buttons provide equivalent controls for:
 
-Simulation movement should not depend directly on FPS.
+* Pause / Play
+* Reset
+* Grid
+* Simulation speed
+* Apply + Reset
 
-Movement should use frame delta time:
+Simulation-speed multiplier is currently limited to approximately:
+
+```text
+0.25× to 4.0×
+```
+
+## 22. Time Model
+
+Simulation movement uses delta time.
 
 ```python
 position += velocity * dt
 ```
 
-This allows similar simulation speed at:
+Therefore movement is not intended to depend directly on rendering FPS.
+
+The raw delta time is capped at:
 
 ```text
-60 FPS
-30 FPS
-20 FPS
+0.05 seconds
 ```
 
-although extremely low FPS may still reduce simulation accuracy.
+to prevent unusually long frames from causing very large simulation jumps.
 
-## 16. Performance Requirements
+## 23. Performance Characteristics
 
-Initial target:
+Primary expected CPU costs include:
 
-```text
-Agents: approximately 2,000
-Minimum target: 30 FPS
-Preferred target: 60 FPS
-```
+* spatial-grid rebuilding
+* neighborhood searches
+* target acquisition
+* local balance evaluation
+* separation evaluation
+* per-agent Python loops
+* Pygame Vector2 operations
+* agent rendering
 
-Future targets:
+Target searches are intentionally staggered.
 
-```text
-Phase 1: 2,000 agents
-Phase 2: 10,000 agents
-Phase 3: 50,000+ agents
-```
+However, `_local_balance()` and separation still perform neighborhood searches for every living agent each update.
 
-Performance improvements should preferably allow larger simulations without requiring stronger hardware.
+This remains a likely optimization target.
 
-## 17. Expected Performance Bottlenecks
+## 24. Current Technical Debt
 
-Likely bottlenecks include:
+The current implementation contains several areas that should eventually be improved.
 
-1. Python-level agent loops
-2. repeated function calls for every agent
-3. neighborhood queries
-4. distance calculations
-5. repeated target searches
-6. large numbers of Python objects
-7. repeated reconstruction of temporary lists
+### 24.1 Single-File Structure
 
-Rendering may eventually become expensive, but simulation logic is expected to be the primary bottleneck first.
+Simulation, GUI, input, configuration, and rendering are currently combined.
 
-## 18. Optimization Strategy
+### 24.2 Sequential Updates
 
-### Phase 1: Algorithmic Optimization
+Update order can affect battle outcome.
 
-Potential improvements:
+### 24.3 Global Enemy-Center Knowledge
 
-* optimize spatial partitioning
-* reduce repeated neighborhood queries
-* reuse nearby-agent information
-* reduce target-search frequency
-* compare squared distances instead of repeatedly calculating square roots
+Agents without local targets use information unavailable through local perception.
 
-For example:
+### 24.4 Reactive Obstacle Navigation
 
-```text
-Target search every frame
-```
+Agents do not perform pathfinding.
 
-may be replaced with:
+### 24.5 Dynamic Retreat Without State Memory
 
-```text
-Target search every 5–10 frames
-```
+Agents may repeatedly switch between advance and retreat near the decision threshold.
 
-when appropriate.
+### 24.6 Repeated Neighborhood Searches
 
-### Phase 2: Data-Oriented Design
+Local balance and separation independently query nearby cells.
 
-Replace large numbers of independent Python objects with arrays such as:
+### 24.7 Unused Death-Record Infrastructure
 
-```text
-positions[]
-velocities[]
-hp[]
-team[]
-```
+`dead_positions` and the `_death_recorded` check currently do not provide meaningful functionality.
 
-This should improve memory locality and make vectorization easier.
+These should either be implemented fully or removed.
 
-### Phase 3: NumPy
-
-Move suitable calculations to vectorized NumPy operations.
-
-### Phase 4: Numba
-
-Use JIT compilation for performance-critical loops.
-
-### Phase 5: GPU Computing
-
-GPU computation may be considered if the simulation grows to tens or hundreds of thousands of agents.
-
-## 19. Future Artificial-Life Features
-
-### 19.1 Morale
-
-Possible morale model:
-
-```text
-Morale =
-    nearby allies
-  - nearby enemies
-  - recent allied deaths
-  + battle advantage
-  + commander effect
-```
-
-Low morale may cause:
-
-* reduced aggression
-* retreat
-* complete rout
-
-### 19.2 Limited Vision
-
-Agents should eventually stop having perfect omnidirectional information.
-
-Possible parameters:
-
-```text
-vision_range
-vision_angle
-```
-
-### 19.3 Information Sharing
-
-Information may propagate through nearby soldiers or command structures.
-
-Example:
-
-```text
-Soldier
-↓
-Squad leader
-↓
-Nearby soldiers
-```
-
-This allows battlefield knowledge itself to become part of the simulation.
-
-### 19.4 Command Hierarchy
-
-Possible hierarchy:
-
-```text
-Army Commander
-↓
-Unit Commander
-↓
-Soldier
-```
-
-Higher levels issue increasingly abstract orders.
-
-Example:
-
-```text
-Commander:
-"Advance on the right."
-
-Soldier:
-"Attack this enemy."
-"Avoid this nearby threat."
-```
-
-### 19.5 Unit Types
-
-Possible future types:
-
-* Infantry
-* Heavy Infantry
-* Archer
-* Cavalry
-* Commander
-
-Each unit type should differ in both physical parameters and behavior rules.
-
-## 20. Evolution System
-
-Behavioral parameters may eventually be encoded as a genome.
-
-Possible genes:
-
-```text
-aggressiveness
-bravery
-cohesion
-vision_range
-retreat_threshold
-target_selection_bias
-```
-
-After each battle, a fitness score can be calculated.
-
-Example:
-
-```text
-Fitness =
-    survival
-  + damage dealt
-  + enemies defeated
-  + team victory
-```
-
-The next generation can be produced through:
-
-```text
-Generation N
-↓
-Battle
-↓
-Fitness Evaluation
-↓
-Selection
-↓
-Crossover
-↓
-Mutation
-↓
-Generation N+1
-```
-
-The purpose is not merely to optimize individual kill count.
-
-The more interesting objective is to observe whether useful collective strategies emerge through selection.
-
-## 21. Recommended Project Structure
-
-Initial structure:
-
-```text
-AlifeBattle/
-├─ alife_battle.py
-├─ requirements.txt
-├─ README.md
-├─ .gitignore
-└─ docs/
-   └─ Design.md
-```
-
-Future structure:
+## 25. Recommended Future Architecture
 
 ```text
 AlifeBattle/
 ├─ main.py
+├─ config/
+│  └─ settings.py
 ├─ simulation/
 │  ├─ simulation.py
 │  ├─ agent.py
-│  ├─ team.py
-│  ├─ world.py
-│  └─ spatial_grid.py
+│  ├─ spatial_grid.py
+│  └─ world.py
 ├─ systems/
 │  ├─ movement.py
 │  ├─ combat.py
 │  ├─ perception.py
-│  └─ morale.py
+│  ├─ morale.py
+│  └─ navigation.py
 ├─ rendering/
-│  └─ renderer.py
-├─ evolution/
-│  ├─ genome.py
-│  └─ evolution.py
+│  ├─ renderer.py
+│  └─ ui.py
+├─ experiments/
+│  └─ runner.py
 ├─ docs/
 │  ├─ Design.md
-│  └─ Performance.md
+│  ├─ Performance.md
+│  └─ Experiments/
 ├─ tests/
 ├─ requirements.txt
-├─ README.md
-└─ .gitignore
+└─ README.md
 ```
 
-## 22. Development Roadmap
+## 26. Development Roadmap
 
-### Version 0.1 — Prototype
+### Version 0.1 — Basic Prototype
 
-* 1,000 vs. 1,000 agents
+Implemented:
+
+* large agent populations
 * movement
-* target search
-* attack
-* death
+* targeting
+* melee combat
 * spatial grid
-* graphical visualization
+* visualization
 
-### Version 0.2 — Performance
+### Version 0.2 — Interactive Experimentation
 
-* profiling
-* spatial-grid optimization
-* reduction of redundant calculations
-* target-search optimization
+Largely implemented:
 
-Target:
+* RED/BLUE parameter editing
+* independent team sizes
+* center/width distributions
+* mouse spin controls
+* retreat visualization
+* directional triangle rendering
+* common simulation parameters
+
+### Version 0.3 — Environment
+
+Partially implemented:
+
+* obstacle generation
+* obstacle collision
+* clustered terrain structures
+
+Future:
+
+* improved navigation around obstacles
+* multiple terrain types
+* movement cost
+
+### Version 0.4 — Simulation Correctness
+
+High priority:
+
+* measure RED/BLUE win-rate bias
+* eliminate update-order bias
+* implement staged or simultaneous updates
+* add deterministic random seeds for reproducible experiments
+
+### Version 0.5 — Experiment Framework
+
+Planned:
+
+* headless simulation
+* automatic repeated battles
+* RED/BLUE win rates
+* survivor counts
+* damage statistics
+* parameter sweeps
+* CSV or JSON export
+
+### Version 0.6 — Behavioral State Model
+
+Planned:
 
 ```text
-2,000 agents at 30 FPS or better
+ADVANCE
+FIGHT
+RETREAT
+RECOVER
+ROUT
 ```
 
-### Version 0.3 — Collective Behavior
+Potential additions:
+
+* state persistence
+* hysteresis
+* morale
+
+### Version 0.7 — Collective Organization
+
+Planned:
 
 * cohesion
-* separation
-* local numerical advantage
-* retreat behavior
-* improved battle-line formation
-
-### Version 0.4 — Perception and Morale
-
-* field of view
-* limited vision
-* morale
-* rout behavior
-
-### Version 0.5 — Units and Commanders
-
-* squads
+* squad membership
 * commanders
-* orders
 * information sharing
+* formation tendencies
 
-### Version 0.6 — Unit Types
+### Version 0.8 — Advanced Artificial Life
 
-* infantry
-* ranged units
-* cavalry
+Planned:
 
-### Version 0.7 — Environment
-
-* walls
-* terrain
-* forests
-* movement costs
-* elevation
-
-### Version 0.8 — Evolution
-
-* genome
-* fitness
+* genome representation
+* fitness evaluation
 * selection
 * mutation
-* automated battles
+* repeated generations
 
-### Version 1.0 — Artificial-Life Battle Simulator
+### Version 1.0 — Artificial-Life Battle Laboratory
 
-The long-term objective is:
+Long-term objective:
 
 ```text
-Local agent rules
+Local rules
 +
 Individual variation
 +
 Environment
 +
+Information limitations
++
 Evolution
 ↓
-Emergent collective tactics
+Emergent collective behavior
 ```
 
-## 23. Long-Term Research Question
+## 27. Engineering Principles
 
-The central question of AlifeBattle is:
+### Principle 1 — Separate Rules from Emergent Results
 
-Can recognizable military behavior emerge without explicitly programming military tactics?
+If encirclement or formation behavior emerges, it should preferably result from local rules rather than explicit high-level commands.
 
-For example:
+### Principle 2 — Preserve Experimental Symmetry
 
-```text
-No command says "encircle the enemy."
-↓
-Encirclement nevertheless emerges.
-```
+RED and BLUE should follow equivalent computational rules unless an experiment intentionally changes them.
 
-or:
+### Principle 3 — Avoid Unbounded Random Search
 
-```text
-No algorithm explicitly says "form a battle line."
-↓
-A battle line emerges from local interactions.
-```
+Any random placement or generation loop must have an explicit termination condition.
 
-AlifeBattle should therefore evolve not only as a game, but also as an experimental platform for:
+### Principle 4 — Separate Simulation and Visualization
 
-* artificial life
-* complex systems
-* emergent behavior
-* evolutionary computation
-* large-scale real-time simulation
+Future experiments should be executable without Pygame rendering.
+
+### Principle 5 — Measure Before Optimizing
+
+Performance work should be based on profiling.
+
+### Principle 6 — Make Experiments Reproducible
+
+Future versions should support explicit random seeds and record parameter configurations.
+
+## 28. Immediate Priorities
+
+The recommended next three engineering tasks are:
+
+1. **Remove update-order bias**
+
+   * introduce staged decision and state application
+   * verify symmetric RED/BLUE win rates
+
+2. **Add automated experiment execution**
+
+   * run identical configurations many times
+   * record win rate and survivors
+
+3. **Separate the current single-file implementation**
+
+   * simulation
+   * rendering
+   * GUI
+   * configuration
+
+These changes will move AlifeBattle from a visual prototype toward a reliable artificial-life experimentation platform.
