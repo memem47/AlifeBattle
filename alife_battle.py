@@ -32,6 +32,20 @@ TEAM_SIZE = 1000
 TEAM_RED = 0
 TEAM_BLUE = 1
 
+TACTICAL_TURN_SECONDS = 1.0
+ORDER_DURATION_TURNS = 10.0
+MANEUVER_COMMANDS = (
+    "LEFT_ADVANCE",
+    "RIGHT_ADVANCE",
+    "CENTER_BREAK",
+    "ENCIRCLE",
+)
+STANCE_COMMANDS = ("CHARGE", "DEFENSE")
+CENTER_BAND = 30.0
+ENCIRCLE_OFFSET = 80.0
+ENCIRCLE_STRENGTH = 1.2
+ADVANCE_SPEED_MULTIPLIER = 1.10
+
 BACKGROUND = (22, 25, 29)
 RED = (225, 80, 76)
 BLUE = (72, 145, 230)
@@ -127,6 +141,7 @@ class Agent:
         "retarget_timer",
         "radius",
         "retreating",
+        "forward",
     )
 
     def __init__(self, team: int, x: float, y: float, config: TeamConfig):
@@ -134,6 +149,7 @@ class Agent:
         self.pos = pygame.Vector2(x, y)
         self.vel = pygame.Vector2()
         self.alive = True
+        self.forward = pygame.Vector2(1.0, 0.0) if team == TEAM_RED else pygame.Vector2(-1.0, 0.0)
 
         # Slightly different traits give the population a more "life-like"
         # character and create local variation without scripting individuals.
@@ -149,12 +165,28 @@ class Agent:
         self.courage = random.uniform(*values["courage"])
         self.target = None
         self.retarget_timer = random.uniform(0.05, 0.35)
-        self.radius = 1
+        self.radius = 2
         self.retreating = False
 
-    def take_damage(self, amount: float):
+    def take_damage(self, amount: float, incoming_dir: pygame.Vector2 | None = None, incoming_multiplier: float = 1.0):
         if not self.alive:
             return
+
+        total_multiplier = incoming_multiplier
+        if incoming_dir is not None and incoming_dir.length_squared() > 1e-9:
+            incoming_norm = safe_normalize(incoming_dir)
+            forward = safe_normalize(self.forward)
+            dot = forward.dot(incoming_norm)
+            if dot > 0.5:
+                damage_multiplier = 0.5
+            elif dot < -0.5:
+                damage_multiplier = 1.5
+            else:
+                damage_multiplier = 1.0
+            total_multiplier *= damage_multiplier
+
+        amount *= total_multiplier
+
         self.hp -= amount
         if self.hp <= 0:
             self.hp = 0
@@ -196,70 +228,137 @@ class BattleSimulation:
         self.grid = SpatialGrid(common_config.cell_size)
         self.agents = []
         self.dead_positions = []
-        # obstacle cells stored as set of (cell_x, cell_y)
-        self.obstacle_cells = set()
+        self.team_maneuver = {TEAM_RED: None, TEAM_BLUE: None}
+        self.team_stance = {TEAM_RED: None, TEAM_BLUE: None}
+        self.maneuver_turns_remaining = {TEAM_RED: 0.0, TEAM_BLUE: 0.0}
+        self.stance_turns_remaining = {TEAM_RED: 0.0, TEAM_BLUE: 0.0}
         self.elapsed = 0.0
         self.reset()
+
+    def _clear_team_orders(self):
+        self.team_maneuver = {TEAM_RED: None, TEAM_BLUE: None}
+        self.team_stance = {TEAM_RED: None, TEAM_BLUE: None}
+        self.maneuver_turns_remaining = {TEAM_RED: 0.0, TEAM_BLUE: 0.0}
+        self.stance_turns_remaining = {TEAM_RED: 0.0, TEAM_BLUE: 0.0}
+
+    def _activate_maneuver(self, team: int, command: str | None):
+        if command not in MANEUVER_COMMANDS and command is not None:
+            return
+        if command is None:
+            self.team_maneuver[team] = None
+            self.maneuver_turns_remaining[team] = 0.0
+            return
+        self.team_maneuver[team] = command
+        self.maneuver_turns_remaining[team] = ORDER_DURATION_TURNS
+
+    def _activate_stance(self, team: int, stance: str | None):
+        if stance not in STANCE_COMMANDS and stance is not None:
+            return
+        if stance is None:
+            self.team_stance[team] = None
+            self.stance_turns_remaining[team] = 0.0
+            return
+        self.team_stance[team] = stance
+        self.stance_turns_remaining[team] = ORDER_DURATION_TURNS
+
+    def _update_order_timers(self, dt: float):
+        if TACTICAL_TURN_SECONDS <= 0.0:
+            return
+        turn_delta = dt / TACTICAL_TURN_SECONDS
+        for team in (TEAM_RED, TEAM_BLUE):
+            if self.team_maneuver[team] is not None:
+                self.maneuver_turns_remaining[team] -= turn_delta
+                if self.maneuver_turns_remaining[team] <= 0.0:
+                    self.team_maneuver[team] = None
+                    self.maneuver_turns_remaining[team] = 0.0
+            if self.team_stance[team] is not None:
+                self.stance_turns_remaining[team] -= turn_delta
+                if self.stance_turns_remaining[team] <= 0.0:
+                    self.team_stance[team] = None
+                    self.stance_turns_remaining[team] = 0.0
+
+    def _team_center_for(self, team: int):
+        red_center, blue_center = self._team_centers()
+        return red_center if team == TEAM_RED else blue_center
+
+    def _enemy_center_for(self, team: int):
+        red_center, blue_center = self._team_centers()
+        return blue_center if team == TEAM_RED else red_center
+
+    def _wing_for_agent(self, agent: "Agent", team_center: pygame.Vector2, team: int):
+        if team == TEAM_RED:
+            return "left" if agent.pos.y < team_center.y else "right"
+        return "left" if agent.pos.y > team_center.y else "right"
+
+    def _team_offensive_multiplier(self, team: int, is_outgoing: bool):
+        stance = self.team_stance.get(team)
+        if stance == "CHARGE":
+            return 1.25 if is_outgoing else 1.20
+        if stance == "DEFENSE":
+            return 0.80 if is_outgoing else 0.75
+        return 1.0
+
+    def _order_vector_for_agent(self, agent: "Agent", red_center: pygame.Vector2, blue_center: pygame.Vector2):
+        team = agent.team
+        if agent.retreating:
+            return pygame.Vector2()
+
+        team_center = red_center if team == TEAM_RED else blue_center
+        enemy_center = blue_center if team == TEAM_RED else red_center
+        maneuver = self.team_maneuver.get(team)
+        if maneuver is None:
+            return pygame.Vector2()
+
+        base_vec = safe_normalize(enemy_center - agent.pos)
+        wing = self._wing_for_agent(agent, team_center, team)
+        order_vec = pygame.Vector2()
+
+        if maneuver == "LEFT_ADVANCE":
+            if wing == "left":
+                order_vec += base_vec * 1.6
+        elif maneuver == "RIGHT_ADVANCE":
+            if wing == "right":
+                order_vec += base_vec * 1.6
+        elif maneuver == "CENTER_BREAK":
+            if abs(agent.pos.y - team_center.y) < CENTER_BAND:
+                order_vec += base_vec * 1.8
+                order_vec += base_vec * (0.4 + agent.aggression)
+        elif maneuver == "ENCIRCLE":
+            flank_y = -ENCIRCLE_OFFSET if agent.pos.y < team_center.y else ENCIRCLE_OFFSET
+            flank_target = enemy_center + pygame.Vector2(0.0, flank_y)
+            order_vec += safe_normalize(flank_target - agent.pos) * ENCIRCLE_STRENGTH
+
+        return order_vec
+
+    def _maneuver_speed_multiplier(self, agent: "Agent", red_center: pygame.Vector2, blue_center: pygame.Vector2):
+        if agent.retreating:
+            return 1.0
+
+        maneuver = self.team_maneuver.get(agent.team)
+        if maneuver is None:
+            return 1.0
+
+        team_center = red_center if agent.team == TEAM_RED else blue_center
+        if maneuver == "CENTER_BREAK":
+            applies = abs(agent.pos.y - team_center.y) < CENTER_BAND
+        elif maneuver in ("LEFT_ADVANCE", "RIGHT_ADVANCE"):
+            wing = self._wing_for_agent(agent, team_center, agent.team)
+            applies = (maneuver == "LEFT_ADVANCE" and wing == "left") or (
+                maneuver == "RIGHT_ADVANCE" and wing == "right"
+            )
+        else:
+            applies = False
+
+        return ADVANCE_SPEED_MULTIPLIER if applies else 1.0
+
+    def _effective_damage_multiplier(self, team: int, is_outgoing: bool):
+        return self._team_offensive_multiplier(team, is_outgoing)
 
     def reset(self):
         self.grid = SpatialGrid(self.common_config.cell_size)
         self.agents.clear()
         self.dead_positions.clear()
-        self.obstacle_cells.clear()
-        # generate clustered obstacles on grid cells
-        cell_size = self.common_config.cell_size
-        cols = max(3, WORLD_WIDTH // cell_size)
-        rows = max(3, WORLD_HEIGHT // cell_size)
-        area_scale = (WORLD_WIDTH * WORLD_HEIGHT) / (700.0 * 425.0)
-        num_clusters = max(3, int(6 * area_scale))
-        # prohibited spawn x ranges around team centers
-        left_spawn_x = 130
-        right_spawn_x = WORLD_WIDTH - 130
-        # reduce spawn margin to make finding seed cells easier
-        spawn_margin = 5 * cell_size
-        for _ in range(num_clusters):
-            cluster_size = random.randint(3, 12)
-            # find seed cell not in spawn margins; give up after attempts and skip cluster
-            seed_found = False
-            for _attempt in range(200):
-                cx = random.randint(1, cols - 2)
-                cy = random.randint(1, rows - 2)
-                px = cx * cell_size + cell_size / 2
-                if abs(px - left_spawn_x) < spawn_margin or abs(px - right_spawn_x) < spawn_margin:
-                    continue
-                if (cx, cy) in self.obstacle_cells:
-                    continue
-                # accept seed
-                seed_found = True
-                break
-            if not seed_found:
-                # couldn't find a valid seed within attempts; skip this cluster
-                continue
-
-            cluster = {(cx, cy)}
-            self.obstacle_cells.add((cx, cy))
-            # grow cluster with bounded attempts to avoid infinite loops
-            max_growth_attempts = cluster_size * 50
-            growth_attempts = 0
-            while (
-                len(cluster) < cluster_size
-                and growth_attempts < max_growth_attempts
-            ):
-                growth_attempts += 1
-                bx, by = random.choice(list(cluster))
-                # 4-neighbors
-                nbors = [(bx + 1, by), (bx - 1, by), (bx, by + 1), (bx, by - 1)]
-                nx, ny = random.choice(nbors)
-                if nx <= 0 or nx >= cols - 1 or ny <= 0 or ny >= rows - 1:
-                    continue
-                if (nx, ny) in self.obstacle_cells:
-                    continue
-                # avoid spawn margins
-                px = nx * cell_size + cell_size / 2
-                if abs(px - left_spawn_x) < spawn_margin or abs(px - right_spawn_x) < spawn_margin:
-                    continue
-                cluster.add((nx, ny))
-                self.obstacle_cells.add((nx, ny))
+        self._clear_team_orders()
         self.elapsed = 0.0
         # Two broad formations. Jitter prevents perfectly rigid initial lines.
         self._spawn_army(TEAM_RED, center_x=130, center_y=WORLD_HEIGHT / 2, facing=1, team_size=self.common_config.red_team_size)
@@ -285,28 +384,6 @@ class BattleSimulation:
                 # smaller jitter so formation is more regular
                 x += random.uniform(-0.5, 0.5)
                 y += random.uniform(-0.5, 0.5)
-                # avoid obstacle cells by nudging y until free
-                cell_x = int(x // self.common_config.cell_size)
-                cell_y = int(y // self.common_config.cell_size)
-                safe = ((cell_x, cell_y) not in self.obstacle_cells)
-                attempts = 0
-                while not safe and attempts < 6:
-                    y += spacing_y
-                    cell_y = int(y // self.common_config.cell_size)
-                    safe = ((cell_x, cell_y) not in self.obstacle_cells)
-                    attempts += 1
-                if not safe:
-                    # try nudging x instead
-                    attempts = 0
-                    safe = False
-                    while not safe and attempts < 6:
-                        x += spacing_x
-                        cell_x = int(x // self.common_config.cell_size)
-                        safe = ((cell_x, cell_y) not in self.obstacle_cells)
-                        attempts += 1
-                if not safe:
-                    # give up on this cell, skip placing here
-                    continue
                 config = self.red_config if team == TEAM_RED else self.blue_config
                 self.agents.append(Agent(team, x, y, config))
                 count += 1
@@ -324,6 +401,7 @@ class BattleSimulation:
 
     def update(self, dt: float):
         self.elapsed += dt
+        self._update_order_timers(dt)
         self.grid.rebuild(self.agents)
 
         # Enemy centers are only a coarse strategic bias. Individual decisions
@@ -346,31 +424,20 @@ class BattleSimulation:
             move = self._movement_vector(agent, red_center, blue_center, local_allies, local_enemies)
 
             if move.length_squared() > 1e-9:
-                desired = safe_normalize(move) * agent.speed
+                speed_multiplier = self._maneuver_speed_multiplier(agent, red_center, blue_center)
+                desired = safe_normalize(move) * agent.speed * speed_multiplier
                 # Smooth acceleration instead of instant direction changes.
                 response = clamp(7.0 * dt, 0.0, 1.0)
                 agent.vel = agent.vel.lerp(desired, response)
             else:
                 agent.vel *= max(0.0, 1.0 - 8.0 * dt)
 
-            # Attempt movement but prevent entering obstacle cells
-            desired = agent.pos + agent.vel * dt
-            ncell = self.grid.key(desired)
-            if ncell in self.obstacle_cells:
-                # try X-only then Y-only movement
-                x_only = pygame.Vector2(agent.pos.x + agent.vel.x * dt, agent.pos.y)
-                y_only = pygame.Vector2(agent.pos.x, agent.pos.y + agent.vel.y * dt)
-                if self.grid.key(x_only) not in self.obstacle_cells:
-                    agent.pos.x = clamp(x_only.x, 8, WORLD_WIDTH - 8)
-                elif self.grid.key(y_only) not in self.obstacle_cells:
-                    agent.pos.y = clamp(y_only.y, 8, WORLD_HEIGHT - 8)
-                else:
-                    # blocked; damp velocity
-                    agent.vel *= 0.1
-            else:
-                agent.pos = desired
-                agent.pos.x = clamp(agent.pos.x, 8, WORLD_WIDTH - 8)
-                agent.pos.y = clamp(agent.pos.y, 8, WORLD_HEIGHT - 8)
+            if agent.vel.length_squared() > 1e-6:
+                agent.forward = agent.vel.normalize()
+
+            agent.pos += agent.vel * dt
+            agent.pos.x = clamp(agent.pos.x, 8, WORLD_WIDTH - 8)
+            agent.pos.y = clamp(agent.pos.y, 8, WORLD_HEIGHT - 8)
 
             self._try_attack(agent)
 
@@ -480,6 +547,7 @@ class BattleSimulation:
             target_vec * (1.0 + 0.8 * agent.aggression)
             + separation * 105.0
             + lateral * wave * 0.18
+            + self._order_vector_for_agent(agent, red_center, blue_center)
         )
 
     def _try_attack(self, agent: Agent):
@@ -491,8 +559,13 @@ class BattleSimulation:
         if agent.pos.distance_squared_to(target.pos) <= attack_range * attack_range:
             agent.vel *= 0.55
             if agent.attack_cooldown <= 0.0:
-                # Damage varies slightly per strike.
-                target.take_damage(agent.damage * random.uniform(0.82, 1.18))
+                # The incoming direction is from the target toward the attacker
+                # as seen by the defender, so it matches the defender's forward.
+                incoming_dir = agent.pos - target.pos
+                outgoing_multiplier = self._team_offensive_multiplier(agent.team, True)
+                target_multiplier = self._team_offensive_multiplier(target.team, False)
+                final_damage = agent.damage * random.uniform(0.82, 1.18) * outgoing_multiplier
+                target.take_damage(final_damage, incoming_dir, incoming_multiplier=target_multiplier)
                 agent.attack_cooldown = agent.attack_interval
 
 
@@ -659,11 +732,30 @@ def create_team_fields(x, config, font):
     return fields
 
 
-def draw_team_panel(screen, rect, title, color, fields, font, small_font):
+def draw_order_button(screen, rect, label, active, accent, font):
+    fill = accent if active else (40, 45, 51)
+    border = accent if active else (80, 85, 90)
+    pygame.draw.rect(screen, fill, rect)
+    pygame.draw.rect(screen, border, rect, 1)
+    text_color = WHITE if active else GRAY
+    screen.blit(font.render(label, True, text_color), (rect.x + 6, rect.y + 4))
+
+
+def draw_order_state(screen, rect, team, sim, team_color, small_font):
+    maneuver_name = sim.team_maneuver.get(team) or "NORMAL"
+    stance_name = sim.team_stance.get(team) or "NORMAL"
+    maneuver_remaining = sim.maneuver_turns_remaining.get(team, 0.0)
+    stance_remaining = sim.stance_turns_remaining.get(team, 0.0)
+
+    screen.blit(small_font.render("ACTIVE ORDERS", True, team_color), (rect.x + 8, rect.y + 361))
+    screen.blit(small_font.render(f"{maneuver_name} [{maneuver_remaining:.1f}]", True, WHITE), (rect.x + 8, rect.y + 377))
+    screen.blit(small_font.render(f"{stance_name}   [{stance_remaining:.1f}]", True, WHITE), (rect.x + 8, rect.y + 393))
+
+
+def draw_team_panel(screen, rect, title, color, fields, font, small_font, order_font, sim, team, order_buttons):
     pygame.draw.rect(screen, (17, 20, 24), rect)
     pygame.draw.line(screen, color, rect.topleft, rect.topright, 3)
     screen.blit(font.render(title, True, color), (rect.x + 8, rect.y + 12))
-    # Label for the min/max columns, placed below the team-size field
     screen.blit(small_font.render("center       width", True, GRAY), (rect.x + 8, rect.y + 65))
     for label, key in PARAMETER_NAMES:
         left, right = fields[key]
@@ -671,12 +763,20 @@ def draw_team_panel(screen, rect, title, color, fields, font, small_font):
         screen.blit(small_font.render(label, True, WHITE), (rect.x + 8, y + 27))
         for field in (left, right):
             field.draw(screen, small_font, color)
-    # Optional per-team size field
     team_size_field = fields.get("team_size")
     if team_size_field is not None:
-        # Team size label sits under the title
         screen.blit(small_font.render("Team size", True, WHITE), (rect.x + 8, rect.y + 40))
         team_size_field.draw(screen, small_font, color)
+
+    screen.blit(small_font.render("ORDERS", True, GRAY), (rect.x + 8, rect.y + 413))
+    for order_name, btn_rect in order_buttons.items():
+        is_active = (
+            (order_name in MANEUVER_COMMANDS and sim.team_maneuver.get(team) == order_name)
+            or (order_name in STANCE_COMMANDS and sim.team_stance.get(team) == order_name)
+        )
+        draw_order_button(screen, btn_rect, order_name.replace("_", " "), is_active, color, order_font)
+
+    draw_order_state(screen, rect, team, sim, color, small_font)
 
 def draw_common_panel(screen, fields, font, small_font, status):
     rect = pygame.Rect(0, WORLD_HEIGHT, WIDTH, BOTTOM_PANEL_HEIGHT)
@@ -709,19 +809,12 @@ def draw_world(screen, sim: BattleSimulation, font, small_font, show_grid):
         for y in range(0, WORLD_HEIGHT, sim.common_config.cell_size):
             pygame.draw.line(world, GRID_COLOR, (0, y), (WORLD_WIDTH, y), 1)
 
-    # draw obstacles as filled grid cells
-    cell_size = sim.common_config.cell_size
-    for cx, cy in getattr(sim, "obstacle_cells", set()):
-        rx = cx * cell_size
-        ry = cy * cell_size
-        pygame.draw.rect(world, (60, 66, 72), (rx, ry, cell_size, cell_size))
-
     # Dead agents are drawn first and dimmer.
     for a in sim.agents:
         if a.alive:
             continue
         color = RED_DARK if a.team == TEAM_RED else BLUE_DARK
-        pygame.draw.circle(world, color, (int(a.pos.x), int(a.pos.y)), 1)
+        pygame.draw.circle(world, color, (int(a.pos.x), int(a.pos.y)), max(1, a.radius))
 
     # Living agents.
     for a in sim.agents:
@@ -734,8 +827,8 @@ def draw_world(screen, sim: BattleSimulation, font, small_font, show_grid):
             color = RED if a.team == TEAM_RED else BLUE
         # Draw agent as a triangle pointing in velocity direction.
         # If velocity is very small, fall back to facing toward enemy side.
-        if a.vel.length_squared() > 1e-6:
-            orient = a.vel.normalize()
+        if a.forward.length_squared() > 1e-6:
+            orient = a.forward.normalize()
         else:
             orient = pygame.Vector2(1, 0) if a.team == TEAM_RED else pygame.Vector2(-1, 0)
 
@@ -814,6 +907,7 @@ def main():
     clock = pygame.time.Clock()
     font = pygame.font.SysFont("consolas", 23, bold=True)
     small_font = pygame.font.SysFont("consolas", 15)
+    order_font = pygame.font.SysFont("consolas", 12)
 
     red_config = TeamConfig(dict(DEFAULT_TEAM_VALUES))
     blue_config = TeamConfig(dict(DEFAULT_TEAM_VALUES))
@@ -853,6 +947,14 @@ def main():
     paused = False
     show_grid = False
     status = ""
+    red_order_buttons = {
+        name: pygame.Rect(12 + (index % 2) * 98, 430 + (index // 2) * 25, 96, 22)
+        for index, name in enumerate(MANEUVER_COMMANDS + STANCE_COMMANDS)
+    }
+    blue_order_buttons = {
+        name: pygame.Rect(WIDTH - PANEL_WIDTH + 12 + (index % 2) * 98, 430 + (index // 2) * 25, 96, 22)
+        for index, name in enumerate(MANEUVER_COMMANDS + STANCE_COMMANDS)
+    }
     apply_rect = pygame.Rect(WIDTH - 135, WORLD_HEIGHT + 38, 120, 30)
     # UI button rects (moved into common panel at bottom, right-aligned)
     pause_rect = pygame.Rect(WIDTH - 320, WORLD_HEIGHT + 8, 60, 26)
@@ -879,6 +981,15 @@ def main():
                         v.handle(event)
             for field in common_fields.values():
                 field.handle(event)
+            if event.type == pygame.MOUSEBUTTONDOWN:
+                for team_id, order_buttons in ((TEAM_RED, red_order_buttons), (TEAM_BLUE, blue_order_buttons)):
+                    for order_name, rect in order_buttons.items():
+                        if rect.collidepoint(event.pos):
+                            if order_name in MANEUVER_COMMANDS:
+                                sim._activate_maneuver(team_id, order_name)
+                            elif order_name in STANCE_COMMANDS:
+                                sim._activate_stance(team_id, order_name)
+                            break
             if event.type == pygame.MOUSEBUTTONDOWN and apply_rect.collidepoint(event.pos):
                 valid = True
                 for config, fields in ((red_config, red_fields), (blue_config, blue_fields)):
@@ -979,8 +1090,32 @@ def main():
         screen.blit(small_font.render("+", True, WHITE), (speed_plus_rect.x + 4, speed_plus_rect.y))
         screen.fill((12, 14, 17), (0, 0, PANEL_WIDTH, WORLD_HEIGHT))
         screen.fill((12, 14, 17), (WIDTH - PANEL_WIDTH, 0, PANEL_WIDTH, WORLD_HEIGHT))
-        draw_team_panel(screen, pygame.Rect(0, 0, PANEL_WIDTH, WORLD_HEIGHT), "RED ARMY", RED, red_fields, font, small_font)
-        draw_team_panel(screen, pygame.Rect(WIDTH - PANEL_WIDTH, 0, PANEL_WIDTH, WORLD_HEIGHT), "BLUE ARMY", BLUE, blue_fields, font, small_font)
+        draw_team_panel(
+            screen,
+            pygame.Rect(0, 0, PANEL_WIDTH, WORLD_HEIGHT),
+            "RED ARMY",
+            RED,
+            red_fields,
+            font,
+            small_font,
+            order_font,
+            sim,
+            TEAM_RED,
+            red_order_buttons,
+        )
+        draw_team_panel(
+            screen,
+            pygame.Rect(WIDTH - PANEL_WIDTH, 0, PANEL_WIDTH, WORLD_HEIGHT),
+            "BLUE ARMY",
+            BLUE,
+            blue_fields,
+            font,
+            small_font,
+            order_font,
+            sim,
+            TEAM_BLUE,
+            blue_order_buttons,
+        )
         draw_common_panel(screen, common_fields, font, small_font, status)
 
         # Draw HUD buttons after panels so they remain visible and not covered
