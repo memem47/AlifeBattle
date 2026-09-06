@@ -705,11 +705,10 @@ def format_value(value):
 
 def create_team_fields(x, config, font):
     fields = {}
-    # Move parameters down to avoid overlapping the team-size field and headers
-    start_y = 82
+    start_y = 112
 
     for index, (label, key) in enumerate(PARAMETER_NAMES):
-        y = start_y + index * 38
+        y = start_y + index * 29
         step = PARAMETER_STEPS[key]
 
         # display as center and width instead of min/max
@@ -718,12 +717,12 @@ def create_team_fields(x, config, font):
         width = max(0.0, vmax - vmin)
         fields[key] = (
             InputField(
-                (x + 8, y, 92, 24),
+                (x + 72, y, 64, 24),
                 format_value(center),
                 step,
             ),
             InputField(
-                (x + 112, y, 92, 24),
+                (x + 144, y, 64, 24),
                 format_value(width),
                 step,
             ),
@@ -747,34 +746,47 @@ def draw_order_state(screen, rect, team, sim, team_color, small_font):
     maneuver_remaining = sim.maneuver_turns_remaining.get(team, 0.0)
     stance_remaining = sim.stance_turns_remaining.get(team, 0.0)
 
-    screen.blit(small_font.render("ACTIVE ORDERS", True, team_color), (rect.x + 8, rect.y + 361))
-    screen.blit(small_font.render(f"{maneuver_name} [{maneuver_remaining:.1f}]", True, WHITE), (rect.x + 8, rect.y + 377))
-    screen.blit(small_font.render(f"{stance_name}   [{stance_remaining:.1f}]", True, WHITE), (rect.x + 8, rect.y + 393))
+    screen.blit(small_font.render("ACTIVE ORDERS", True, team_color), (rect.x + 8, rect.y + 328))
+    screen.blit(small_font.render(f"MOVE   {maneuver_name} [{maneuver_remaining:.1f}]", True, WHITE), (rect.x + 8, rect.y + 344))
+    screen.blit(small_font.render(f"STANCE {stance_name} [{stance_remaining:.1f}]", True, WHITE), (rect.x + 8, rect.y + 360))
 
 
 def draw_team_panel(screen, rect, title, color, fields, font, small_font, order_font, sim, team, order_buttons):
     pygame.draw.rect(screen, (17, 20, 24), rect)
     pygame.draw.line(screen, color, rect.topleft, rect.topright, 3)
     screen.blit(font.render(title, True, color), (rect.x + 8, rect.y + 12))
-    screen.blit(small_font.render("center       width", True, GRAY), (rect.x + 8, rect.y + 65))
+    pygame.draw.line(screen, (60, 65, 70), (rect.x + 8, rect.y + 35), (rect.right - 8, rect.y + 35), 1)
+    screen.blit(small_font.render("FORCE SIZE", True, GRAY), (rect.x + 12, rect.y + 42))
+    pygame.draw.line(screen, (60, 65, 70), (rect.x + 8, rect.y + 71), (rect.right - 8, rect.y + 71), 1)
+    screen.blit(small_font.render("TRAITS", True, color), (rect.x + 8, rect.y + 78))
+    screen.blit(small_font.render("CENTER", True, GRAY), (rect.x + 76, rect.y + 96))
+    screen.blit(small_font.render("WIDTH", True, GRAY), (rect.x + 149, rect.y + 96))
     for label, key in PARAMETER_NAMES:
         left, right = fields[key]
         y = left.rect.y
-        screen.blit(small_font.render(label, True, WHITE), (rect.x + 8, y + 27))
+        screen.blit(small_font.render(label.upper(), True, WHITE), (rect.x + 12, y + 5))
         for field in (left, right):
             field.draw(screen, small_font, color)
     team_size_field = fields.get("team_size")
     if team_size_field is not None:
-        screen.blit(small_font.render("Team size", True, WHITE), (rect.x + 8, rect.y + 40))
         team_size_field.draw(screen, small_font, color)
 
-    screen.blit(small_font.render("ORDERS", True, GRAY), (rect.x + 8, rect.y + 413))
+    pygame.draw.line(screen, (60, 65, 70), (rect.x + 8, rect.y + 320), (rect.right - 8, rect.y + 320), 1)
+    screen.blit(small_font.render("ORDERS", True, GRAY), (rect.x + 8, rect.y + 380))
     for order_name, btn_rect in order_buttons.items():
         is_active = (
             (order_name in MANEUVER_COMMANDS and sim.team_maneuver.get(team) == order_name)
             or (order_name in STANCE_COMMANDS and sim.team_stance.get(team) == order_name)
         )
-        draw_order_button(screen, btn_rect, order_name.replace("_", " "), is_active, color, order_font)
+        order_labels = {
+            "LEFT_ADVANCE": "LEFT ADV.",
+            "RIGHT_ADVANCE": "RIGHT ADV.",
+            "CENTER_BREAK": "CENTER",
+            "ENCIRCLE": "ENCIRCLE",
+            "CHARGE": "CHARGE",
+            "DEFENSE": "DEFENSE",
+        }
+        draw_order_button(screen, btn_rect, order_labels[order_name], is_active, color, order_font)
 
     draw_order_state(screen, rect, team, sim, color, small_font)
 
@@ -915,8 +927,8 @@ def main():
     red_fields = create_team_fields(0, red_config, small_font)
     blue_fields = create_team_fields(WIDTH - PANEL_WIDTH, blue_config, small_font)
     # Team-size fields per team (moved from common panel)
-    red_team_size_field = InputField((8, 40, 120, 24), common_config.red_team_size, 1)
-    blue_team_size_field = InputField((WIDTH - PANEL_WIDTH + 8, 40, 120, 24), common_config.blue_team_size, 1)
+    red_team_size_field = InputField((108, 40, 100, 24), common_config.red_team_size, 1)
+    blue_team_size_field = InputField((WIDTH - PANEL_WIDTH + 108, 40, 100, 24), common_config.blue_team_size, 1)
     # attach to fields dict for unified handling
     red_fields["team_size"] = red_team_size_field
     blue_fields["team_size"] = blue_team_size_field
@@ -948,11 +960,11 @@ def main():
     show_grid = False
     status = ""
     red_order_buttons = {
-        name: pygame.Rect(12 + (index % 2) * 98, 430 + (index // 2) * 25, 96, 22)
+        name: pygame.Rect(12 + (index % 2) * 98, 397 + (index // 2) * 25, 96, 22)
         for index, name in enumerate(MANEUVER_COMMANDS + STANCE_COMMANDS)
     }
     blue_order_buttons = {
-        name: pygame.Rect(WIDTH - PANEL_WIDTH + 12 + (index % 2) * 98, 430 + (index // 2) * 25, 96, 22)
+        name: pygame.Rect(WIDTH - PANEL_WIDTH + 12 + (index % 2) * 98, 397 + (index // 2) * 25, 96, 22)
         for index, name in enumerate(MANEUVER_COMMANDS + STANCE_COMMANDS)
     }
     apply_rect = pygame.Rect(WIDTH - 135, WORLD_HEIGHT + 38, 120, 30)
