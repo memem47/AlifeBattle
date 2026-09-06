@@ -2,9 +2,9 @@
 
 AlifeBattle is a real-time artificial-life-style battle simulation written in Python and Pygame.
 
-Thousands of autonomous agents fight using individual traits and local information. The player does not directly control individual soldiers. Instead, the player gives temporary tactical orders such as **Center Break**, **Encircle**, **Charge**, and **Defense**, while each agent continues making its own decisions.
+Thousands of autonomous soldiers fight using individual traits and local information. The player does not directly control individual units. Instead, the player gives temporary high-level orders such as **Left Advance**, **Center Break**, **Encircle**, **Charge**, and **Defense**, while each agent continues making its own decisions.
 
-> **Core idea:** Influence autonomous agents rather than directly controlling them.
+> **Core idea:** Tactical advantages should emerge from movement, positioning, local numerical superiority, facing, and agent behavior rather than from arbitrary command bonuses.
 
 ## Screenshot
 
@@ -12,97 +12,157 @@ Thousands of autonomous agents fight using individual traits and local informati
 
 The main screen consists of:
 
-| Area         | Purpose                                   |
-| ------------ | ----------------------------------------- |
-| Left panel   | RED army parameters and tactical orders   |
-| Center       | Real-time battlefield                     |
-| Right panel  | BLUE army parameters and tactical orders  |
-| Bottom panel | Common simulation parameters and controls |
+| Area | Purpose |
+|---|---|
+| Left panel | RED army size, traits, and tactical orders |
+| Center | Real-time battlefield |
+| Right panel | BLUE army size, traits, and tactical orders |
+| Bottom panel | Shared simulation parameters and controls |
 
-## How It Works
+# What's New
 
-```mermaid
-flowchart LR
-    A[Player Order] --> B[Army-level Tactical Bias]
-    B --> C[Individual Agent Decision]
+This section compares the current version with the README version **before the previous README update**.
 
-    D[Agent Traits] --> C
-    E[Nearby Enemies] --> C
-    F[Nearby Allies] --> C
-    G[HP / Courage] --> C
+The changes below are therefore cumulative changes introduced across the recent development cycle.
 
-    C --> H[Movement]
-    C --> I[Retreat]
-    C --> J[Attack]
+| Added / Changed | Earlier Version | Current Version |
+|---|---|---|
+| **ARMOR** | No individual defense trait | Every agent has individual damage reduction |
+| **Trait names** | `Speed`, `Damage`, `Attack` | `MOVE SPEED`, `ATTACK POWER`, `ATTACK INTERVAL` |
+| **LEFT / RIGHT ADVANCE** | Small speed bonus | Main wing ×1.50, opposite wing ×0.70 |
+| **CENTER BREAK** | Small center bonus | Center ×1.50, wings ×0.70 |
+| **ENCIRCLE movement** | Mainly directional bias | Flanks ×1.40, center ×0.60 |
+| **Encircle center behavior** | Most units could receive flank influence | Center receives no encircle movement vector |
+| **Initial formation** | One rectangular block | Three-band formation by default |
+| **Formation architecture** | Single spawn method | `THREE_BAND` and `SINGLE_BLOCK` |
+| **Combat phase** | Attack closely coupled to agent update | Attacks collected and damage resolved in a later phase |
+| **Multi-hit directional damage** | Attack directions combined before damage calculation | Each hit gets its own Front / Side / Rear calculation |
+| **Encirclement detection** | Only nearby ally/enemy counts | Enemy directions divided into 8 sectors |
+| **Encirclement pressure** | Surrounding direction had no effect | Multi-direction pressure increases retreat tendency |
+| **Escape behavior** | Retreat mainly away from target / toward home | Retreating agents search 16 possible escape directions |
+| **Blocked retreat** | Retreat ignored enemy distribution | Agents prefer locally safer escape gaps |
+| **Local tactical state** | Ally/enemy count only | Allies, enemies, enemy directions, encirclement ratio |
+| **Strength visualization** | Seven traits | ARMOR is included as the eighth trait |
 
-    H --> K[Battlefield State]
-    I --> K
-    J --> K
+## Most Important New Mechanic: Encirclement
 
-    K --> C
-```
+The largest change is that **encirclement now has consequences even without a direct "Encircle damage bonus."**
 
-The player provides a high-level intention, but the final behavior emerges from individual decisions.
-
-For example:
+Previously:
 
 ```text
-Player issues ENCIRCLE
-        ↓
-Flank movement bias is added
-        ↓
-Each agent still reacts independently to:
-- nearby enemies
-- nearby allies
-- health
-- courage
-- separation
-- current target
-        ↓
-Collective movement emerges
+ENCIRCLE
+↓
+Flank troops move around the enemy
+↓
+Position changes
 ```
 
-## Current Features
+Now:
 
-| Category         | Features                                                   |
-| ---------------- | ---------------------------------------------------------- |
-| Scale            | 1,000 vs. 1,000 agents by default                          |
-| Agent variation  | HP, Speed, Damage, Attack, Perception, Aggression, Courage |
-| Perception       | Local enemy search                                         |
-| Movement         | Target pursuit, separation, tactical movement bias         |
-| Combat           | Melee attacks and attack cooldown                          |
-| Defense          | Front / side / rear damage differences                     |
-| Retreat          | Based on local numerical disadvantage and HP               |
-| Commands         | Left Advance, Right Advance, Center Break, Encircle        |
-| Stances          | Charge, Defense                                            |
-| Command duration | Temporary tactical orders                                  |
-| Configuration    | Independent RED / BLUE parameters                          |
-| Performance      | Spatial grid for nearby-agent searches                     |
+```text
+ENCIRCLE
+↓
+Flank troops move around the enemy
+↓
+Enemies appear in multiple directions
+↓
+Encirclement ratio increases
+↓
+Defenders become more likely to retreat
+↓
+They search for an escape gap
+↓
+If exits are blocked, retreat becomes difficult
+↓
+Side / rear attacks become more likely
+```
 
-## Agent Model
+This follows the project's central design principle:
+
+> **ENCIRCLE itself does not grant extra damage. The spatial situation created by encirclement creates the advantage.**
+
+# Simulation Overview
+
+```mermaid
+flowchart TD
+    A[Player Tactical Order] --> B[Movement Bias / Speed Redistribution]
+
+    C[Individual Traits] --> D[Agent Decision]
+    E[Nearby Allies / Enemies] --> D
+    F[Enemy Directions] --> D
+    B --> D
+
+    D --> G{Retreat?}
+
+    G -->|No| H[Target Movement]
+    G -->|Yes| I[Search Safe Escape Direction]
+
+    H --> J[Movement]
+    I --> J
+
+    J --> K[Update Facing]
+
+    K --> L[Collect Attack Events]
+
+    L --> M[Calculate Each Hit Individually]
+    M --> N[Aggregate Damage by Target]
+    N --> O[Apply Damage]
+
+    O --> P[New Battlefield State]
+    P --> D
+```
+
+# Current Features
+
+| Category | Current Implementation |
+|---|---|
+| Scale | 1,000 vs. 1,000 agents by default |
+| Individual variation | 8 randomized traits |
+| Formation | Three-band formation by default |
+| Targeting | Local nearest-enemy acquisition |
+| Spatial interaction | Spatial grid |
+| Movement | Pursuit, separation, retreat, tactical commands |
+| Facing | Persistent directional orientation |
+| Combat | Melee attacks with cooldown |
+| Directional combat | Front / Side / Rear damage |
+| Defense | ARMOR + facing + stance |
+| Local analysis | Allies, enemies, attack directions |
+| Encirclement | 8-direction sector analysis |
+| Retreat | HP, Courage, numerical disadvantage, encirclement |
+| Escape | 16-direction safety search |
+| Maneuvers | Left Advance, Right Advance, Center Break, Encircle |
+| Stances | Charge, Defense |
+| Configuration | Independent RED / BLUE parameters |
+| Orders | Temporary tactical turns |
+
+# Agent Traits
 
 Each soldier is an independent `Agent`.
 
-Each agent receives randomly generated traits when the battle starts.
+Traits are generated independently from the configured range when a battle begins.
 
-| Trait      | Meaning                             |
-| ---------- | ----------------------------------- |
-| HP         | Maximum health                      |
-| Speed      | Movement speed                      |
-| Damage     | Base attack damage                  |
-| Attack     | Time between attacks                |
-| Perception | Enemy detection range               |
-| Aggression | Strength of forward/target movement |
-| Courage    | Resistance to retreat               |
+| Display Name | Internal Name | Default Range | Meaning |
+|---|---|---:|---|
+| HP | `max_hp` | 80–120 | Total health |
+| MOVE SPEED | `speed` | 34–52 | Base movement velocity |
+| ATTACK POWER | `damage` | 8–15 | Base damage per attack |
+| ATTACK INTERVAL | `attack_interval` | 0.45–0.75 s | Delay between attacks; lower is stronger |
+| ARMOR | `armor` | 0.05–0.25 | Fraction of received damage reduced |
+| PERCEPTION | `perception` | 120–180 | Enemy detection range |
+| AGGRESSION | `aggression` | 0.35–1.00 | Strength of movement toward enemies |
+| COURAGE | `courage` | 0.25–1.00 | Resistance to retreat |
 
-The GUI defines each trait using:
+## Center / Width Configuration
+
+The GUI defines each trait distribution using:
 
 ```text
-center
-width
+CENTER
+WIDTH
 ```
 
-The generated range is:
+The actual range is:
 
 ```text
 minimum = center - width / 2
@@ -112,245 +172,502 @@ maximum = center + width / 2
 Example:
 
 ```text
-HP center = 100
-HP width  = 40
+HP CENTER = 100
+HP WIDTH  = 40
 
-→ Random HP range = 80–120
+→ random HP range = 80–120
 ```
 
-Each agent samples its value independently from that range.
+Every agent independently samples its value from the resulting uniform distribution.
 
-## Agent Decision Flow
+Changes are applied when `APPLY + RESET` is executed.
 
-```mermaid
-flowchart TD
-    A[Agent Update] --> B{Need new target?}
+# ARMOR
 
-    B -->|Yes| C[Search nearby enemies]
-    B -->|No| D[Keep current target]
+ARMOR reduces incoming damage.
 
-    C --> E[Evaluate local allies / enemies]
-    D --> E
-
-    E --> F{Retreat condition?}
-
-    F -->|Yes| G[Move away / toward home]
-    F -->|No| H[Calculate normal movement]
-
-    H --> I[Target direction]
-    H --> J[Separation]
-    H --> K[Tactical order bias]
-
-    I --> L[Combine movement vectors]
-    J --> L
-    K --> L
-
-    L --> M[Apply movement speed]
-    G --> M
-
-    M --> N[Update facing]
-
-    N --> O{Enemy in melee range?}
-
-    O -->|Yes| P[Attack]
-    O -->|No| Q[Next update]
-
-    P --> Q
-```
-
-## Local Behavior
-
-### Target Acquisition
-
-Agents periodically search for the nearest living enemy inside their own perception radius.
-
-Target searches are staggered to avoid all agents performing expensive searches in the same frame.
-
-### Separation
-
-Nearby agents repel each other.
-
-This prevents the entire army from collapsing into a single point and helps create more natural-looking formations.
-
-### Local Force Balance
-
-Each agent counts nearby allies and enemies inside the configured `Local balance` radius.
-
-This influences retreat decisions.
-
-### Retreat
-
-An agent may retreat when:
-
-* nearby enemies greatly outnumber nearby allies
-* courage is low
-* HP becomes sufficiently low
-
-Retreat overrides maneuver commands.
-
-```mermaid
-flowchart LR
-    A[Normal behavior] --> B{Outnumbered or badly hurt?}
-    B -->|No| A
-    B -->|Yes| C[Retreat]
-    C --> D{Situation improved?}
-    D -->|Yes| A
-    D -->|No| C
-```
-
-Retreat is currently recalculated continuously rather than implemented as a persistent state machine.
-
-## Facing and Directional Damage
-
-Each agent has a `forward` direction.
-
-The direction:
-
-* initially faces the enemy
-* follows the actual movement direction
-* remains unchanged while stationary
-* controls triangle orientation
-* is used for directional damage calculation
-
-### Damage Direction
-
-| Incoming attack | Damage multiplier |
-| --------------- | ----------------: |
-| Front           |              0.5× |
-| Side            |              1.0× |
-| Rear            |              1.5× |
-
-Therefore attacking from behind is significantly more effective than attacking from the front.
-
-Base damage also includes random variation:
+Example:
 
 ```text
-0.82× – 1.18×
+ARMOR = 0.20
+
+→ incoming damage ×0.80
+```
+
+ARMOR and HP represent different defensive properties:
+
+| Trait | Meaning |
+|---|---|
+| HP | Total amount of damage the agent can survive |
+| ARMOR | Reduction applied to each incoming hit |
+
+Conceptually:
+
+```text
+received damage
+=
+attack damage
+× stance modifier
+× directional modifier
+× (1 - ARMOR)
+```
+
+# Initial Formations
+
+## THREE_BAND
+
+The default formation divides each army into three groups.
+
+```text
+Upper band   30%
+
+Center band  40%
+
+Lower band   30%
 ```
 
 Conceptually:
 
 ```text
-Final damage
+RED                                  BLUE
+
+████                              ████
+
+██████                            ██████
+
+████                              ████
+```
+
+The three-band formation makes tactical differences such as flank advances, center breakthroughs, and encirclement easier to observe.
+
+## SINGLE_BLOCK
+
+The earlier rectangular formation still exists internally.
+
+```text
+████████                ████████
+████████                ████████
+████████                ████████
+```
+
+Current default:
+
+```text
+THREE_BAND
+```
+
+Formation selection is not yet exposed through the GUI.
+
+# Local Tactical Awareness
+
+Agents no longer evaluate only the number of nearby allies and enemies.
+
+The current local state is represented by:
+
+```python
+@dataclass
+class LocalSituation:
+    allies: int
+    enemies: int
+    enemy_direction_count: int
+    encirclement_ratio: float
+```
+
+This allows an agent to distinguish between situations such as:
+
+```text
+10 enemies all in front
+```
+
+and:
+
+```text
+10 enemies distributed around several directions
+```
+
+even when the total enemy count is identical.
+
+# Encirclement Detection
+
+The space around an agent is divided into:
+
+```python
+ENCIRCLEMENT_SECTORS = 8
+```
+
+directional sectors.
+
+Conceptually:
+
+```text
+          0
+      7       1
+
+    6           2
+
+      5       3
+          4
+```
+
+Nearby enemies are assigned to these sectors.
+
+The simulation then calculates:
+
+```text
+enemy_direction_count
+```
+
+and:
+
+```text
+encirclement_ratio
 =
-Agent damage
-× random variation
-× attacker stance
-× defender stance
-× directional multiplier
+occupied enemy sectors / 8
 ```
 
-## Tactical Orders
+Examples:
 
-The player can independently command RED and BLUE during battle.
+| Enemy distribution | Approximate result |
+|---|---|
+| Enemies mostly in front | Low direction count |
+| Enemies in front + flank | Medium direction count |
+| Enemies around most sides | High direction count |
+| Near-complete encirclement | Ratio approaching 1.0 |
 
-There are two independent command categories:
+This means **enemy geometry now matters independently of raw enemy count**.
+
+# Retreat Logic
+
+Retreat depends on several factors.
+
+```mermaid
+flowchart TD
+    A[Local Tactical State] --> B{Badly Wounded?}
+    A --> C{Locally Outnumbered?}
+    A --> D{Enemies in Many Directions?}
+
+    B -->|Yes| R[RETREAT]
+    C -->|Yes + Courage insufficient| R
+    D -->|High encirclement pressure| R
+
+    B -->|No| E[Continue Evaluation]
+    C -->|No| E
+    D -->|Low| E
+
+    E --> F[Continue Fighting]
+```
+
+An agent may retreat because of:
+
+- low HP
+- local numerical disadvantage
+- low Courage
+- enemies appearing in multiple directions
+- strong encirclement pressure
+
+## Encirclement and Courage
+
+Encirclement raises the effective Courage required to remain in combat.
+
+Conceptually:
 
 ```text
-Maneuver
+More enemy directions
+↓
+Higher pressure
+↓
+Even relatively courageous agents may retreat
+```
+
+This means:
+
+```text
+same enemy count
 +
-Combat Stance
+different spatial distribution
+=
+different tactical outcome
 ```
 
-One maneuver and one stance may be active simultaneously.
+# Escape Direction Search
 
-Example:
+Previously, retreat mostly meant moving:
 
 ```text
-RED ARMY
-
-Maneuver: ENCIRCLE
-Stance: CHARGE
+away from current target
 ```
 
-## Maneuver Commands
-
-| Command       | Target             | Effect                               |
-| ------------- | ------------------ | ------------------------------------ |
-| LEFT ADVANCE  | Left wing          | Stronger forward bias + 10% speed    |
-| RIGHT ADVANCE | Right wing         | Stronger forward bias + 10% speed    |
-| CENTER BREAK  | Center             | Strong breakthrough bias + 10% speed |
-| ENCIRCLE      | Upper/lower groups | Movement toward enemy flanks         |
-
-### LEFT ADVANCE
-
-LEFT is defined from the army's perspective.
+or:
 
 ```text
-RED faces →
-
-screen top    = RED left wing
-screen bottom = RED right wing
+toward the army's home side
 ```
 
-For BLUE:
+The current version evaluates possible escape routes.
+
+Number of sampled directions:
+
+```python
+ESCAPE_DIRECTION_SAMPLES = 16
+```
+
+Conceptually:
+
+```mermaid
+flowchart TD
+    A[Agent decides to retreat] --> B[Find nearby enemies]
+    B --> C[Generate 16 candidate directions]
+    C --> D[Calculate enemy danger for each direction]
+    D --> E[Add small preference toward home]
+    E --> F[Choose lowest-danger direction]
+    F --> G[Escape]
+```
+
+Nearby and directly aligned enemies create greater danger.
+
+Therefore:
 
 ```text
-BLUE faces ←
+safe home direction
+→ retreat toward home
 
-screen top    = BLUE right wing
-screen bottom = BLUE left wing
+home direction blocked
+→ choose another escape path
+
+surrounded
+→ choose the least dangerous available direction
 ```
 
-### CENTER BREAK
+The home preference is intentionally weak.
 
-Agents near the army's vertical center receive:
-
-* stronger enemy-directed movement
-* additional aggression-based forward bias
-* temporary 10% movement-speed bonus
-
-### ENCIRCLE
-
-ENCIRCLE directs:
+The priority is:
 
 ```text
-upper agents → enemy upper flank
-lower agents → enemy lower flank
+safety
+>
+returning home
 ```
+
+# Facing and Directional Damage
+
+Every agent maintains a `forward` direction.
+
+It:
+
+- initially points toward the enemy
+- follows movement
+- persists while nearly stationary
+- controls triangle orientation
+- affects received damage
+
+Directional multipliers:
+
+| Incoming Direction | Damage |
+|---|---:|
+| Front | ×0.50 |
+| Side | ×1.00 |
+| Rear | ×1.50 |
+
+# Per-Hit Directional Damage
+
+This is another major recent change.
+
+Previously, several simultaneous attacks against one target had their attack directions combined before the directional modifier was calculated.
+
+That could lose information about attacks coming from different sides.
+
+The current system evaluates each hit individually.
 
 ```mermaid
 flowchart LR
-    U[Upper wing] --> UF[Enemy upper flank]
-    C[Center] --> EC[Enemy area]
-    L[Lower wing] --> LF[Enemy lower flank]
+    A[Front Hit] --> D1[×0.5]
+    B[Side Hit] --> D2[×1.0]
+    C[Rear Hit] --> D3[×1.5]
+
+    D1 --> E[Sum Final Damage]
+    D2 --> E
+    D3 --> E
+
+    E --> F[Apply Once to Target HP]
 ```
 
-ENCIRCLE currently changes movement direction but does not increase movement speed.
-
-The command is a **bias**, not direct position control.
-
-## Combat Stances
-
-| Stance  | Outgoing Damage | Incoming Damage | Character         |
-| ------- | --------------: | --------------: | ----------------- |
-| NORMAL  |           1.00× |           1.00× | Balanced          |
-| CHARGE  |           1.25× |           1.20× | High-risk offense |
-| DEFENSE |           0.80× |           0.75× | Defensive         |
-
-### CHARGE
+For each attack:
 
 ```text
-Attack ↑
-Defense ↓
+ATTACK POWER
+× random variation
+× attacker stance
+× defender stance
+× individual attack direction
+× ARMOR
 ```
 
-Useful when attempting to break an enemy line quickly.
+is calculated independently.
 
-### DEFENSE
+Only after that are the resulting damages summed.
+
+This preserves the benefit of attacking the same defender from several directions.
+
+# Damage Calculation Structure
+
+Damage calculation and HP modification are now separated.
+
+Conceptually:
 
 ```text
-Attack ↓
-Defense ↑
+calculate_received_damage()
+↓
+pure damage calculation
+
+apply_damage()
+↓
+HP / alive state modification
 ```
 
-Useful when trying to survive or hold the current battle state.
+This makes simultaneous combat resolution easier to reason about.
 
-## Timed Commands
+# Tactical Maneuvers
 
-Commands are temporary.
+A maneuver redistributes army mobility rather than simply providing a free global bonus.
 
-Current configuration:
+> **Maneuver = concentration of mobility.**
+
+| Maneuver | Main Force | Main Speed | Other Force | Other Speed |
+|---|---|---:|---|---:|
+| NORMAL | All | ×1.00 | — | — |
+| LEFT ADVANCE | Left wing | ×1.50 | Right wing | ×0.70 |
+| RIGHT ADVANCE | Right wing | ×1.50 | Left wing | ×0.70 |
+| CENTER BREAK | Center | ×1.50 | Both wings | ×0.70 |
+| ENCIRCLE | Upper/lower flanks | ×1.40 | Center | ×0.60 |
+
+The base `agent.speed` trait is never modified.
+
+```text
+effective speed
+=
+MOVE SPEED
+× maneuver multiplier
+```
+
+# LEFT ADVANCE
+
+LEFT is defined from the army's own perspective.
+
+RED faces right:
+
+```text
+screen upper side = LEFT
+screen lower side = RIGHT
+```
+
+BLUE faces left:
+
+```text
+screen upper side = RIGHT
+screen lower side = LEFT
+```
+
+Effect:
+
+```text
+LEFT wing  ×1.50
+RIGHT wing ×0.70
+```
+
+Only the left wing receives the additional forward maneuver vector.
+
+# RIGHT ADVANCE
+
+Mirror image of LEFT ADVANCE:
+
+```text
+RIGHT wing ×1.50
+LEFT wing  ×0.70
+```
+
+# CENTER BREAK
+
+```text
+left wing      center      right wing
+   ×0.70        ×1.50         ×0.70
+                  →
+                  →
+                  →
+```
+
+Center agents also receive a stronger forward movement vector influenced by Aggression.
+
+# ENCIRCLE
+
+ENCIRCLE redistributes movement toward the upper and lower groups.
+
+```text
+          flank ×1.40
+             ↘
+
+center ×0.60 → enemy
+
+             ↗
+          flank ×1.40
+```
+
+Current behavior:
+
+- upper group moves toward enemy upper flank
+- lower group moves toward enemy lower flank
+- center receives no encirclement vector
+- center speed becomes ×0.60
+- flank speed becomes ×1.40
+
+Most importantly:
+
+> **ENCIRCLE has no direct attack-power bonus.**
+
+Its advantage is expected to emerge through:
+
+```text
+flanking movement
+↓
+multi-direction pressure
+↓
+retreat
+↓
+restricted escape
+↓
+side / rear attacks
+↓
+local collapse
+```
+
+# Combat Stances
+
+One stance may be active independently of the maneuver.
+
+| Stance | Outgoing Damage | Incoming Damage |
+|---|---:|---:|
+| NORMAL | ×1.00 | ×1.00 |
+| CHARGE | ×1.25 | ×1.20 |
+| DEFENSE | ×0.80 | ×0.75 |
+
+## CHARGE
+
+Higher offensive output at the cost of taking more damage.
+
+## DEFENSE
+
+Reduced incoming damage at the cost of lower attack power.
+
+Maneuver and stance may be combined:
+
+```text
+CENTER BREAK + CHARGE
+
+ENCIRCLE + DEFENSE
+```
+
+# Timed Orders
+
+Current values:
 
 ```python
 TACTICAL_TURN_SECONDS = 1.0
@@ -360,194 +677,190 @@ ORDER_DURATION_TURNS = 10.0
 Therefore:
 
 ```text
-1 tactical turn = 1 simulation second
-1 order = 10 tactical turns
+1 turn = 1 simulation second
+1 command = 10 simulation seconds
 ```
 
-The side panels show the active order and remaining duration.
-
-Example:
+Example display:
 
 ```text
 ACTIVE ORDERS
-ENCIRCLE [7.3]
-CHARGE   [4.8]
+
+MOVE   ENCIRCLE [7.3]
+STANCE CHARGE   [4.8]
 ```
 
-When the timer reaches zero, the command automatically returns to `NORMAL`.
+Maneuver and stance timers are independent.
 
-### Command Replacement
+# Combat Resolution
 
-Issuing another maneuver replaces the current maneuver.
+Combat uses a separate attack phase after movement.
 
-```text
-ENCIRCLE [4.2]
-↓
-CENTER BREAK
-↓
-CENTER BREAK [10.0]
+```mermaid
+flowchart TD
+    A[Movement Phase] --> B[Collect Attack Events]
+    B --> C[Group Hits by Target]
+    C --> D[Calculate Every Hit Separately]
+    D --> E[Sum Final Damage]
+    E --> F[Apply Damage]
 ```
 
-Stances behave independently in the same way.
+Attack intent is collected before damage application.
 
-## Simulation Speed
+This allows attacks already committed during the frame to be resolved together rather than canceling them simply because another unit happened to apply damage first.
 
-Order duration follows **simulation time**, not real-world time.
+# Spatial Grid
 
-| SIM_SPEED | Approximate real duration of a 10-turn command |
-| --------: | ---------------------------------------------: |
-|      0.5× |                                     20 seconds |
-|      1.0× |                                     10 seconds |
-|      2.0× |                                      5 seconds |
-|      4.0× |                                    2.5 seconds |
+A spatial grid reduces local-search cost.
 
-When paused, command timers also stop.
-
-## Movement Speed Calculation
-
-Maneuver commands do not permanently modify the agent's original speed.
-
-Currently:
-
-```text
-effective speed
-=
-agent speed
-× maneuver multiplier
-```
-
-For LEFT ADVANCE, RIGHT ADVANCE, and CENTER BREAK:
-
-```text
-maneuver multiplier = 1.10
-```
-
-This structure is intentionally designed so that future terrain can be integrated naturally:
-
-```text
-effective speed
-=
-agent speed
-× maneuver multiplier
-× terrain multiplier
-```
-
-## Spatial Grid
-
-A naive simulation could require every agent to compare itself with every other agent.
-
-For 2,000 agents:
+Without spatial partitioning:
 
 ```text
 2,000 × 2,000
 ≈ 4,000,000 possible pair checks
 ```
 
-AlifeBattle instead divides the battlefield into grid cells.
+Instead:
 
 ```mermaid
 flowchart LR
-    A[Agent position] --> B[Spatial grid cell]
-    B --> C[Nearby cells only]
-    C --> D[Candidate agents]
-    D --> E[Exact distance check]
+    A[Agent] --> B[Grid Cell]
+    B --> C[Nearby Cells]
+    C --> D[Candidate Agents]
+    D --> E[Exact Distance Check]
 ```
 
-The spatial grid is currently used for:
+The grid supports:
 
-* target acquisition
-* local force-balance calculation
-* separation
+- target acquisition
+- local tactical analysis
+- encirclement detection
+- separation
+- escape-direction enemy search
 
-## User Interface
+# Agent Visualization
 
-### RED / BLUE Panels
+Agents are rendered as triangles.
 
-Each army can independently configure:
+Triangle direction represents facing.
 
-| Parameter       | Editable |
-| --------------- | -------- |
-| Team size       | Yes      |
-| HP              | Yes      |
-| Speed           | Yes      |
-| Damage          | Yes      |
-| Attack interval | Yes      |
-| Perception      | Yes      |
-| Aggression      | Yes      |
-| Courage         | Yes      |
+| State | Color |
+|---|---|
+| RED normal | Red |
+| BLUE normal | Blue |
+| RED retreating | Orange-red |
+| BLUE retreating | Light blue |
+| Dead RED | Dark red |
+| Dead BLUE | Dark blue |
 
-The panels also contain tactical command buttons and current command status.
+Triangle size represents composite individual strength across:
 
-### Common Parameters
+- HP
+- MOVE SPEED
+- ATTACK POWER
+- ATTACK INTERVAL
+- ARMOR
+- PERCEPTION
+- AGGRESSION
+- COURAGE
 
-| Parameter     | Meaning                             |
-| ------------- | ----------------------------------- |
-| Cell size     | Spatial-grid resolution             |
-| Separation    | Personal-space radius               |
-| Melee range   | Attack range                        |
-| Local balance | Radius used to count allies/enemies |
+`ATTACK INTERVAL` is inverted because lower values represent faster attacks.
 
-Changes take effect through:
+# User Interface
+
+Each army panel contains:
+
+```text
+RED / BLUE ARMY
+
+FORCE SIZE
+
+TRAITS
+               CENTER   WIDTH
+HP
+MOVE SPEED
+ATTACK POWER
+ATTACK INTERVAL
+ARMOR
+PERCEPTION
+AGGRESSION
+COURAGE
+
+ACTIVE ORDERS
+
+ORDERS
+```
+
+RED and BLUE can be configured independently.
+
+## Common Parameters
+
+| Parameter | Purpose |
+|---|---|
+| Cell size | Spatial-grid resolution |
+| Separation | Collision-avoidance radius |
+| Melee range | Attack distance |
+| Local balance | Radius for tactical local analysis |
+
+Changes are applied using:
 
 ```text
 APPLY + RESET
 ```
 
-Existing agents are regenerated with the new values.
+# Controls
 
-## Controls
+| Input | Action |
+|---|---|
+| Space | Pause / resume |
+| R | Reset |
+| G | Toggle grid |
+| + | Increase simulation speed |
+| - | Decrease simulation speed |
+| Esc | Quit |
+| PAUSE / PLAY | Mouse pause control |
+| RESET | Restart |
+| GRID | Toggle spatial grid |
+| APPLY + RESET | Apply parameters |
+| Tactical buttons | Issue army orders |
 
-| Input            | Action                      |
-| ---------------- | --------------------------- |
-| Space            | Pause / resume              |
-| R                | Reset battle                |
-| G                | Toggle spatial grid         |
-| +                | Increase simulation speed   |
-| -                | Decrease simulation speed   |
-| Esc              | Exit                        |
-| PAUSE / PLAY     | Mouse pause control         |
-| RESET            | Restart battle              |
-| GRID             | Toggle grid                 |
-| APPLY + RESET    | Apply configuration changes |
-| Tactical buttons | Issue army commands         |
+# Simulation Speed
 
-## Requirements
+| SIM_SPEED | Approximate Real Duration of a 10-Turn Order |
+|---:|---:|
+| 0.25× | 40 s |
+| 0.5× | 20 s |
+| 1.0× | 10 s |
+| 2.0× | 5 s |
+| 4.0× | 2.5 s |
 
-Recommended environment:
+Pause also stops tactical-order timers.
 
-* Python 3.12 or 3.13
-* Pygame
+# Requirements
 
-Install dependencies:
+Recommended:
+
+- Python 3.12 or 3.13
+- Pygame
+
+Install:
 
 ```bash
 python -m pip install -r requirements.txt
 ```
 
-## Running
+# Running
 
-Create a virtual environment:
+Windows:
 
 ```powershell
 py -3.13 -m venv .venv
 .\.venv\Scripts\Activate.ps1
-```
-
-Install dependencies:
-
-```powershell
 python -m pip install -r requirements.txt
-```
-
-Run:
-
-```powershell
 python alife_battle.py
 ```
 
-## Repository Structure
-
-Recommended current structure:
+# Repository Structure
 
 ```text
 AlifeBattle/
@@ -563,242 +876,281 @@ AlifeBattle/
    └─ Design.md
 ```
 
-## Adding a Screenshot
+# Adding a Screenshot
 
-1. Start AlifeBattle.
-2. Configure the battle so that agents and tactical controls are clearly visible.
-3. Capture the complete application window.
-4. Crop unnecessary desktop areas.
-5. Save the image as:
+Capture the full application window while a tactically recognizable situation is visible.
+
+Recommended examples:
 
 ```text
-assets/screenshots/main_battle.png
+assets/screenshots/
+├─ main_battle.png
+├─ center_break.png
+├─ encircle.png
+├─ encircled_retreat.png
+└─ three_band_formation.png
 ```
 
-6. Commit the image to Git:
-
-```bash
-git add assets/screenshots/main_battle.png
-git add README.md
-git commit -m "Add AlifeBattle screenshot"
-```
-
-The README displays it using:
+Embed an image using:
 
 ```markdown
 ![AlifeBattle screenshot](assets/screenshots/main_battle.png)
 ```
 
-For future screenshots, use descriptive filenames:
+# Current Limitations
+
+## Movement Is Still Sequential
+
+Combat resolution is separated into a later phase, but movement remains agent-by-agent.
+
+Conceptually:
 
 ```text
-assets/screenshots/
-├─ main_battle.png
-├─ encircle_order.png
-├─ center_break.png
-└─ parameter_panel.png
-```
-
-Additional images can then be embedded with:
-
-```markdown
-![Encircle command](assets/screenshots/encircle_order.png)
-```
-
-## Future Terrain System
-
-The old impassable-obstacle concept has been removed.
-
-Future versions are planned to introduce terrain such as:
-
-| Terrain     | Possible Effects              |
-| ----------- | ----------------------------- |
-| High ground | Combat / visibility advantage |
-| Low ground  | Potential disadvantage        |
-| Forest      | Reduced speed and perception  |
-| River       | Large movement penalty        |
-| Plain       | Normal movement               |
-
-Terrain should generally modify movement cost rather than simply prohibit entry.
-
-Example:
-
-```text
-Plain  → speed ×1.00
-Forest → speed ×0.70
-River  → speed ×0.50
-```
-
-Possible future calculation:
-
-```text
-effective speed
-=
-base speed
-× maneuver multiplier
-× terrain multiplier
-```
-
-## Current Limitations
-
-### Sequential Agent Updates
-
-Agents are currently updated sequentially.
-
-Because RED agents are created first, RED and BLUE do not yet have perfectly simultaneous updates.
-
-Conceptually, the current model is closer to:
-
-```text
-RED agent updates
+Agent A decides
 ↓
-state changes immediately
+Agent A position changes
 ↓
-BLUE agent later observes changed state
+Agent B decides using partly updated positions
 ```
 
-This may introduce simulation-order bias.
-
-A future staged update system could use:
+A more rigorous simulation would use:
 
 ```mermaid
 flowchart LR
     A[Observe] --> B[Decide]
-    B --> C[Calculate movement]
-    C --> D[Apply movement]
-    D --> E[Calculate attacks]
-    E --> F[Apply damage simultaneously]
+    B --> C[Store Movement Intent]
+    C --> D[Apply All Movement]
+    D --> E[Collect Attacks]
+    E --> F[Apply Damage]
 ```
 
-### Global Enemy-Center Knowledge
+This remains an important future correctness improvement.
 
-Agents without local targets currently know the approximate center of the enemy army.
+## Encirclement Uses Simple Sector Occupancy
 
-This is a deliberate simplification and means the simulation is not yet based purely on local information.
+Encirclement currently measures how many of eight sectors contain at least one enemy.
 
-### Retreat Has No Persistent State
-
-Retreat is recalculated every update.
-
-Future versions may introduce:
+Therefore:
 
 ```text
-ADVANCE
+1 enemy in a sector
+```
+
+and:
+
+```text
+20 enemies in the same sector
+```
+
+both mark that sector as occupied.
+
+A future version could consider:
+
+- number of enemies per direction
+- enemy distance
+- threat strength
+- friendly escape coverage
+
+## Escape Search Is Local and Heuristic
+
+The escape algorithm samples 16 directions and evaluates nearby danger.
+
+It does not perform:
+
+- pathfinding
+- long-range route planning
+- coordinated group retreat
+- prediction of moving enemies
+
+This is intentionally a local Agent rule.
+
+## No Dynamic Morale Yet
+
+COURAGE is a fixed personal trait.
+
+There is no changing battlefield `morale` state yet.
+
+Possible future effects:
+
+```text
+nearby ally deaths
+rear attacks
+being surrounded
+successful breakthroughs
+commander loss
+```
+
+could modify morale and cause:
+
+```text
 FIGHT
 RETREAT
-RECOVER
 ROUT
+RECOVER
 ```
 
-### Simple Encirclement
+state transitions.
 
-ENCIRCLE currently applies flank-directed movement bias.
+## Formation Selection Has No GUI
 
-It does not yet provide:
+`THREE_BAND` and `SINGLE_BLOCK` are implemented internally, but there is no formation selector in the GUI.
 
-* explicit squads
-* coordinated waypoints
-* command hierarchy
-* route planning
-* persistent flank groups
+## Global Enemy-Center Bias
 
-Actual encirclement must still emerge from local interactions.
+An agent without a local target still uses the approximate enemy army center as a strategic direction.
 
-## Development Roadmap
+Therefore the simulation is not yet purely local-information-based.
+
+## Facing Changes Freely
+
+Facing follows velocity and can change relatively quickly.
+
+Real military formations cannot necessarily rotate as freely as individual autonomous agents.
+
+A future turning-rate limitation could increase the value of flanking and rear attacks.
+
+## No Terrain
+
+The battlefield is currently flat and uniform.
+
+# Planned Terrain
+
+Future terrain may include:
+
+| Terrain | Possible Effect |
+|---|---|
+| Plain | Normal movement |
+| Forest | Reduced movement / perception |
+| River | Strong movement penalty |
+| High ground | Tactical advantage |
+| Low ground | Tactical disadvantage |
+
+The intended movement model is:
+
+```text
+effective speed
+=
+base MOVE SPEED
+× maneuver multiplier
+× terrain multiplier
+```
+
+# Development Roadmap
 
 ```mermaid
 flowchart TD
-    A[Core Agent Simulation] --> B[Interactive Parameters]
-    B --> C[Tactical Commands]
-    C --> D[Terrain]
-    D --> E[Simulation Fairness]
-    E --> F[Experiment Framework]
-    F --> G[Collective Organization]
-    G --> H[Evolution]
+    A[Core Agents] --> B[Configurable Traits]
+    B --> C[Tactical Orders]
+    C --> D[Formation System]
+    D --> E[Spatial Encirclement]
+    E --> F[Morale / Rout]
+    F --> G[Terrain]
+    G --> H[Simultaneous Movement]
+    H --> I[Experiment Framework]
+    I --> J[Collective Organization]
+    J --> K[Evolution]
 ```
 
-### Implemented
+## Implemented
 
-* large autonomous populations
-* individual traits
-* local perception
-* melee combat
-* retreat
-* directional damage
-* configurable RED / BLUE armies
-* spatial grid
-* tactical commands
-* tactical stances
-* timed commands
+- 1,000 vs. 1,000 autonomous agents
+- randomized individual traits
+- ARMOR
+- local perception
+- target acquisition
+- spatial grid
+- separation
+- retreat behavior
+- facing
+- Front / Side / Rear combat
+- per-hit directional damage
+- RED / BLUE configurable parameters
+- tactical maneuvers
+- tactical stances
+- maneuver speed redistribution
+- tactical turn timers
+- three-band formation
+- single-block formation implementation
+- local tactical-state analysis
+- 8-sector encirclement detection
+- encirclement-sensitive retreat
+- 16-direction escape search
+- separated combat-resolution phase
 
-### Next
+## Near-Term
 
-* terrain and movement costs
-* improved tactical behaviors
-* RED/BLUE fairness measurement
-* simultaneous/staged updates
-* automated repeated battles
-* statistics and experiment export
+- fully simultaneous movement
+- improve RED / BLUE mirror symmetry
+- expose formation selection in GUI
+- richer encirclement threat measurement
+- morale and rout
+- automated repeated-battle testing
+- deterministic random seeds
 
-### Longer Term
+## Longer Term
 
-* morale
-* squads
-* commanders
-* information sharing
-* different unit types
-* evolutionary algorithms
-* behavioral evolution
+- terrain
+- elevation
+- squads
+- commanders
+- limited information sharing
+- unit types
+- coordinated retreat
+- automated experiments
+- statistics
+- parameter sweeps
+- evolution
 
-## Core Design Principle
+# Design Principle: Spatial Advantage
 
-AlifeBattle distinguishes between **command** and **control**.
+The core design principle is:
 
-The player gives commands:
+> **Do not reward the name of a tactic. Reward the situation created by the tactic.**
+
+For example, the game should not work like this:
 
 ```text
-"Advance the left wing."
-"Break through the center."
-"Encircle."
-"Charge."
+ENCIRCLE button
+↓
+Attack Power +50%
 ```
 
-But the player does not directly decide:
-
-```text
-Agent #128 moves to (413, 221).
-```
-
-Each agent still determines its own behavior.
+Instead:
 
 ```mermaid
 flowchart TD
-    A[Player intention] --> B[Tactical command]
-    B --> C[Agent-level bias]
-
-    D[Individual traits] --> E[Agent decision]
-    F[Local battlefield] --> E
-    C --> E
-
-    E --> G[Individual actions]
-    G --> H[Collective behavior]
+    A[ENCIRCLE] --> B[Flanks move faster]
+    B --> C[Enemy attacked from more directions]
+    C --> D[Directional damage advantage]
+    C --> E[Encirclement pressure rises]
+    E --> F[Defenders retreat]
+    F --> G[Escape routes become dangerous]
+    G --> H[Formation breaks down]
 ```
 
-The aim is for military-looking behavior to arise from the interaction between:
+The same principle applies to other commands:
 
-* individual differences
-* local information
-* player commands
-* environmental constraints
+```text
+CENTER BREAK
+↓
+mobility concentrated in center
+↓
+local force density changes
+↓
+battlefield geometry changes
+↓
+advantage or vulnerability emerges
+```
 
-## Research Question
+# Core Research Question
 
-> Can recognizable military behavior emerge from simple local rules, individual variation, limited strategic commands, and environmental constraints?
+> Can recognizable military tactics emerge from simple individual rules, local information, individual variation, spatial positioning, and limited high-level commands?
 
-AlifeBattle is intended to develop into both a playable simulation and a small experimental platform for:
+AlifeBattle is intended to evolve into both a playable simulation and a small experimental platform for:
 
-* artificial life
-* agent-based simulation
-* emergent behavior
-* complex systems
-* evolutionary computation
+- artificial life
+- agent-based simulation
+- emergent behavior
+- complex systems
+- tactical decision-making
+- evolutionary computation
