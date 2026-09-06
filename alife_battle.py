@@ -439,7 +439,47 @@ class BattleSimulation:
             agent.pos.x = clamp(agent.pos.x, 8, WORLD_WIDTH - 8)
             agent.pos.y = clamp(agent.pos.y, 8, WORLD_HEIGHT - 8)
 
-            self._try_attack(agent)
+        # Resolve combat in a second pass so every agent decides against the same
+        # world state before any damage is applied. This removes per-frame update
+        # order bias from sequential attack resolution.
+        attack_events = []
+        for agent in self.agents:
+            if not agent.alive:
+                continue
+            self._collect_attack_event(agent, attack_events)
+
+        resolved_targets = defaultdict(list)
+        for attacker, target, incoming_dir, incoming_multiplier in attack_events:
+            if not attacker.alive or not target.alive:
+                continue
+            resolved_targets[target].append((attacker, incoming_dir, incoming_multiplier))
+
+        for target, hits in resolved_targets.items():
+            if not target.alive:
+                continue
+
+            total_damage = 0.0
+            combined_dir = pygame.Vector2()
+            multiplier_weight = 0.0
+            for attacker, incoming_dir, incoming_multiplier in hits:
+                final_damage = attacker.damage * random.uniform(0.82, 1.18) * self._team_offensive_multiplier(attacker.team, True)
+                total_damage += final_damage
+                if incoming_dir.length_squared() > 1e-9:
+                    combined_dir += incoming_dir * final_damage
+                    multiplier_weight += incoming_multiplier * final_damage
+                attacker.attack_cooldown = attacker.attack_interval
+
+            if total_damage <= 0.0:
+                continue
+
+            if combined_dir.length_squared() > 1e-9:
+                incoming_dir = safe_normalize(combined_dir)
+                combined_multiplier = multiplier_weight / total_damage if total_damage > 0.0 else 1.0
+            else:
+                incoming_dir = None
+                combined_multiplier = 1.0
+
+            target.take_damage(total_damage, incoming_dir, incoming_multiplier=combined_multiplier)
 
         # Save a tiny visual record of deaths, then forget dead agents' targets.
         # We do not remove objects from self.agents so references stay stable.
@@ -550,23 +590,24 @@ class BattleSimulation:
             + self._order_vector_for_agent(agent, red_center, blue_center)
         )
 
-    def _try_attack(self, agent: Agent):
+    def _collect_attack_event(self, agent: Agent, attack_events: list):
         target = agent.target
         if target is None or not target.alive:
             return
 
         attack_range = self.common_config.melee_range + agent.radius + target.radius
-        if agent.pos.distance_squared_to(target.pos) <= attack_range * attack_range:
-            agent.vel *= 0.55
-            if agent.attack_cooldown <= 0.0:
-                # The incoming direction is from the target toward the attacker
-                # as seen by the defender, so it matches the defender's forward.
-                incoming_dir = agent.pos - target.pos
-                outgoing_multiplier = self._team_offensive_multiplier(agent.team, True)
-                target_multiplier = self._team_offensive_multiplier(target.team, False)
-                final_damage = agent.damage * random.uniform(0.82, 1.18) * outgoing_multiplier
-                target.take_damage(final_damage, incoming_dir, incoming_multiplier=target_multiplier)
-                agent.attack_cooldown = agent.attack_interval
+        if agent.pos.distance_squared_to(target.pos) > attack_range * attack_range:
+            return
+
+        agent.vel *= 0.55
+        if agent.attack_cooldown > 0.0:
+            return
+
+        # The incoming direction is from the target toward the attacker,
+        # as seen by the defender, so it matches the defender's forward.
+        incoming_dir = agent.pos - target.pos
+        target_multiplier = self._team_offensive_multiplier(target.team, False)
+        attack_events.append((agent, target, incoming_dir, target_multiplier))
 
 
 class InputField:
