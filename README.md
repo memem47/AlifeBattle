@@ -34,7 +34,8 @@ The changes below are therefore cumulative changes introduced across the recent 
 | **ENCIRCLE movement** | Mainly directional bias | Flanks ×1.40, center ×0.60 |
 | **Encircle center behavior** | Most units could receive flank influence | Center receives no encircle movement vector |
 | **Initial formation** | One rectangular block | Three-band formation by default |
-| **Formation architecture** | Single spawn method | `THREE_BAND` and `SINGLE_BLOCK` |
+| **Formation architecture** | Single spawn method | Generic formation definitions with `THREE_BAND` and `SINGLE_BLOCK` |
+| **Formation control** | Agents only inherited their spawn position | Persistent unit IDs and local slots follow independently moving formation anchors |
 | **Combat phase** | Attack closely coupled to agent update | Attacks collected and damage resolved in a later phase |
 | **Multi-hit directional damage** | Attack directions combined before damage calculation | Each hit gets its own Front / Side / Rear calculation |
 | **Encirclement detection** | Only nearby ally/enemy counts | Enemy directions divided into 8 sectors |
@@ -256,7 +257,22 @@ Current default:
 THREE_BAND
 ```
 
-Formation selection is not yet exposed through the GUI.
+## Formation Controller
+
+Each formation is defined as a set of persistent units. A unit has a population
+ratio and a local forward/lateral offset. Agents retain their assigned unit ID
+and local slot after spawning, so the formation can move as a group without
+reconstructing or reassigning agents.
+
+The controller keeps separate formation origins for RED and BLUE. Maneuvers
+deform unit target offsets in each army's local coordinate system, which keeps
+the same command mirrored correctly for armies facing opposite directions.
+Agents normally follow their formation slot, with weaker correction during
+close combat. Retreating agents are free to leave the formation to search for a
+safer escape route.
+
+The current formation definitions are extensible in code, but formation
+selection is not yet exposed through the GUI.
 
 # Local Tactical Awareness
 
@@ -671,14 +687,14 @@ Current values:
 
 ```python
 TACTICAL_TURN_SECONDS = 1.0
-ORDER_DURATION_TURNS = 10.0
+ORDER_DURATION_TURNS = 5.0
 ```
 
 Therefore:
 
 ```text
 1 turn = 1 simulation second
-1 command = 10 simulation seconds
+1 command = 5 simulation seconds
 ```
 
 Example display:
@@ -872,8 +888,10 @@ AlifeBattle/
 ├─ assets/
 │  └─ screenshots/
 │     └─ main_battle.png
-└─ docs/
-   └─ Design.md
+├─ docs/
+│  └─ Design.md
+└─ tests/
+    └─ test_update_order.py
 ```
 
 # Adding a Screenshot

@@ -19,13 +19,20 @@ import pygame
 # A spatial grid keeps neighbor searches much cheaper than O(N^2).
 # ============================================================
 
-WORLD_WIDTH = 700
-# Stretch vertical size by 1.3x for a taller world
-WORLD_HEIGHT = int(425 * 1.3)
+BATTLE_VIEW_WIDTH = 600
+BATTLE_VIEW_HEIGHT = 600
+LOGICAL_WORLD_WIDTH = BATTLE_VIEW_WIDTH
+LOGICAL_WORLD_HEIGHT = BATTLE_VIEW_HEIGHT
+
+# Compatibility aliases point at the logical simulation world; the view size is
+# still represented separately by BATTLE_VIEW_WIDTH/BATTLE_VIEW_HEIGHT.
+WORLD_WIDTH = LOGICAL_WORLD_WIDTH
+WORLD_HEIGHT = LOGICAL_WORLD_HEIGHT
+
 PANEL_WIDTH = 220
 BOTTOM_PANEL_HEIGHT = 150
-WIDTH = PANEL_WIDTH * 2 + WORLD_WIDTH
-HEIGHT = WORLD_HEIGHT + BOTTOM_PANEL_HEIGHT
+WIDTH = PANEL_WIDTH * 2 + BATTLE_VIEW_WIDTH
+HEIGHT = BATTLE_VIEW_HEIGHT + BOTTOM_PANEL_HEIGHT
 FPS = 60
 
 TEAM_SIZE = 1000
@@ -33,7 +40,7 @@ TEAM_RED = 0
 TEAM_BLUE = 1
 
 TACTICAL_TURN_SECONDS = 1.0
-ORDER_DURATION_TURNS = 10.0
+ORDER_DURATION_TURNS = 5.0
 MANEUVER_COMMANDS = (
     "LEFT_ADVANCE",
     "RIGHT_ADVANCE",
@@ -42,13 +49,19 @@ MANEUVER_COMMANDS = (
 )
 STANCE_COMMANDS = ("CHARGE", "DEFENSE")
 INITIAL_FORMATION_NAMES = ("THREE_BAND", "SINGLE_BLOCK")
-CENTER_BAND = 30.0
-ENCIRCLE_OFFSET = 80.0
-ENCIRCLE_STRENGTH = 1.2
-MAIN_ATTACK_SPEED_MULTIPLIER = 1.50
-SUPPORT_SPEED_MULTIPLIER = 0.70
-ENCIRCLE_FLANK_SPEED_MULTIPLIER = 1.40
-ENCIRCLE_CENTER_SPEED_MULTIPLIER = 0.60
+FORMATION_LATERAL_SPACING = LOGICAL_WORLD_HEIGHT * 0.22
+FORMATION_TOLERANCE = 12.0
+FORMATION_CORRECTION_STRENGTH = 0.8
+FORMATION_MAX_CORRECTION = 1.5
+FORMATION_COMBAT_STRENGTH = 0.35
+FORMATION_ANCHOR_RESPONSE = 4.0
+FORMATION_ORIGIN_ADVANCE_SPEED = 24.0
+FORMATION_ADVANCE_DISTANCE = LOGICAL_WORLD_WIDTH * (110.0 / 700.0)
+FORMATION_ENCIRCLE_FORWARD_DISTANCE = LOGICAL_WORLD_WIDTH * (85.0 / 700.0)
+FORMATION_ENCIRCLE_LATERAL_DISTANCE = LOGICAL_WORLD_HEIGHT * (55.0 / 552.0)
+FORMATION_ENGAGEMENT_GAP = 120.0
+INITIAL_ARMY_X_RATIO = 130.0 / 700.0
+HOME_X_RATIO = 65.0 / 700.0
 
 BACKGROUND = (22, 25, 29)
 RED = (225, 80, 76)
@@ -61,14 +74,21 @@ WHITE = (235, 235, 235)
 GRAY = (135, 140, 145)
 GRID_COLOR = (38, 42, 48)
 
-CELL_SIZE = 24
-SEPARATION_RADIUS = 10.0
-MELEE_RANGE = 9.0
+CELL_SIZE = 20
+SEPARATION_RADIUS = 5.0
+MELEE_RANGE = 3.0
 
-DEFAULT_PERCEPTION_RADIUS = 150.0
-LOCAL_BALANCE_RADIUS = 42.0
+DEFAULT_PERCEPTION_RADIUS = 64.0
+LOCAL_BALANCE_RADIUS = 24.0
 ENCIRCLEMENT_SECTORS = 8
 ESCAPE_DIRECTION_SAMPLES = 16
+MIN_ENEMIES_PER_ENCIRCLEMENT_SECTOR = 2
+REAR_PRESSURE = 0.30
+SIDE_PRESSURE = 0.15
+FRONT_REAR_BONUS = 0.20
+BOTH_SIDES_BONUS = 0.20
+ENCIRCLEMENT_RETREAT_THRESHOLD = 0.55
+ENCIRCLEMENT_COURAGE_THRESHOLD = 0.72
 
 SIM_SPEED = 1.0
 
@@ -94,6 +114,46 @@ PARAMETER_STEPS = {
     "courage": 0.05,
 }
 
+@dataclass(frozen=True)
+class FormationUnitSpec:
+    unit_id: str
+    population_ratio: float
+    base_forward_offset: float
+    base_lateral_offset: float
+
+
+@dataclass(frozen=True)
+class FormationDefinition:
+    name: str
+    units: tuple
+
+
+@dataclass
+class FormationUnitState:
+    unit_id: str
+    base_offset_local: pygame.Vector2
+    current_offset_local: pygame.Vector2
+    target_offset_local: pygame.Vector2
+
+
+THREE_BAND_FORMATION = FormationDefinition(
+    name="THREE_BAND",
+    units=(
+        FormationUnitSpec("UNIT_0", 0.30, 0.0, -1.0),
+        FormationUnitSpec("UNIT_1", 0.40, 0.0, 0.0),
+        FormationUnitSpec("UNIT_2", 0.30, 0.0, 1.0),
+    ),
+)
+SINGLE_BLOCK_FORMATION = FormationDefinition(
+    name="SINGLE_BLOCK",
+    units=(FormationUnitSpec("UNIT_0", 1.0, 0.0, 0.0),),
+)
+FORMATION_DEFINITIONS = {
+    THREE_BAND_FORMATION.name: THREE_BAND_FORMATION,
+    SINGLE_BLOCK_FORMATION.name: SINGLE_BLOCK_FORMATION,
+}
+
+
 @dataclass
 class TeamConfig:
     values: dict
@@ -105,6 +165,11 @@ class LocalSituation:
     enemies: int
     enemy_direction_count: int
     encirclement_ratio: float
+    front_enemies: int
+    rear_enemies: int
+    left_enemies: int
+    right_enemies: int
+    encirclement_pressure: float
 
 
 @dataclass
@@ -133,10 +198,44 @@ def clamp(value, low, high):
     return max(low, min(high, value))
 
 
+def world_to_view(pos: pygame.Vector2) -> pygame.Vector2:
+    return pygame.Vector2(
+        pos.x * (BATTLE_VIEW_WIDTH / LOGICAL_WORLD_WIDTH),
+        pos.y * (BATTLE_VIEW_HEIGHT / LOGICAL_WORLD_HEIGHT),
+    )
+
+
+def view_to_world(pos: pygame.Vector2) -> pygame.Vector2:
+    return pygame.Vector2(
+        pos.x * (LOGICAL_WORLD_WIDTH / BATTLE_VIEW_WIDTH),
+        pos.y * (LOGICAL_WORLD_HEIGHT / BATTLE_VIEW_HEIGHT),
+    )
+
+
 def safe_normalize(v: pygame.Vector2) -> pygame.Vector2:
     if v.length_squared() < 1e-9:
         return pygame.Vector2()
     return v.normalize()
+
+
+def _calculate_encirclement_pressure(front_enemies, rear_enemies, left_enemies, right_enemies):
+    front_active = front_enemies >= MIN_ENEMIES_PER_ENCIRCLEMENT_SECTOR
+    rear_active = rear_enemies >= MIN_ENEMIES_PER_ENCIRCLEMENT_SECTOR
+    left_active = left_enemies >= MIN_ENEMIES_PER_ENCIRCLEMENT_SECTOR
+    right_active = right_enemies >= MIN_ENEMIES_PER_ENCIRCLEMENT_SECTOR
+
+    pressure = 0.0
+    if rear_active:
+        pressure += REAR_PRESSURE
+    if left_active:
+        pressure += SIDE_PRESSURE
+    if right_active:
+        pressure += SIDE_PRESSURE
+    if front_active and rear_active:
+        pressure += FRONT_REAR_BONUS
+    if left_active and right_active:
+        pressure += BOTH_SIDES_BONUS
+    return clamp(pressure, 0.0, 1.0)
 
 
 class Agent:
@@ -160,6 +259,8 @@ class Agent:
         "radius",
         "retreating",
         "forward",
+        "formation_unit_id",
+        "formation_slot_local",
     )
 
     def __init__(self, team: int, x: float, y: float, config: TeamConfig):
@@ -186,6 +287,8 @@ class Agent:
         self.retarget_timer = random.uniform(0.05, 0.35)
         self.radius = 2
         self.retreating = False
+        self.formation_unit_id = None
+        self.formation_slot_local = pygame.Vector2()
 
     def _directional_damage_multiplier(self, incoming_dir: pygame.Vector2 | None) -> float:
         if incoming_dir is None or incoming_dir.length_squared() <= 1e-9:
@@ -270,6 +373,8 @@ class BattleSimulation:
         self.team_stance = {TEAM_RED: None, TEAM_BLUE: None}
         self.maneuver_turns_remaining = {TEAM_RED: 0.0, TEAM_BLUE: 0.0}
         self.stance_turns_remaining = {TEAM_RED: 0.0, TEAM_BLUE: 0.0}
+        self.team_formation_units = {TEAM_RED: {}, TEAM_BLUE: {}}
+        self.team_formation_origin = {TEAM_RED: pygame.Vector2(), TEAM_BLUE: pygame.Vector2()}
         self.initial_formation = "THREE_BAND"
         self.elapsed = 0.0
         self.reset()
@@ -279,6 +384,103 @@ class BattleSimulation:
         self.team_stance = {TEAM_RED: None, TEAM_BLUE: None}
         self.maneuver_turns_remaining = {TEAM_RED: 0.0, TEAM_BLUE: 0.0}
         self.stance_turns_remaining = {TEAM_RED: 0.0, TEAM_BLUE: 0.0}
+
+    def _formation_definition(self, formation_name=None):
+        return FORMATION_DEFINITIONS.get(formation_name or self.initial_formation, THREE_BAND_FORMATION)
+
+    def _army_basis(self, team):
+        forward = pygame.Vector2(1.0, 0.0) if team == TEAM_RED else pygame.Vector2(-1.0, 0.0)
+        return forward, forward.rotate(90.0)
+
+    def _initialize_formation_units(self, team, formation_name):
+        definition = self._formation_definition(formation_name)
+        states = {}
+        for spec in definition.units:
+            base = pygame.Vector2(
+                spec.base_forward_offset,
+                spec.base_lateral_offset * FORMATION_LATERAL_SPACING,
+            )
+            states[spec.unit_id] = FormationUnitState(spec.unit_id, base, base.copy(), base.copy())
+        self.team_formation_units[team] = states
+
+    def _formation_weights(self, team):
+        states = list(self.team_formation_units[team].values())
+        if not states:
+            return {}
+        laterals = [state.base_offset_local.y for state in states]
+        center = (min(laterals) + max(laterals)) * 0.5
+        half_span = max(abs(value - center) for value in laterals)
+        weights = {}
+        for state in states:
+            normalized = 0.0 if half_span <= 1e-9 else clamp((state.base_offset_local.y - center) / half_span, -1.0, 1.0)
+            weights[state.unit_id] = normalized
+        return weights
+
+    def _update_formation_targets(self):
+        for team, states in self.team_formation_units.items():
+            maneuver = self.team_maneuver.get(team)
+            normalized_lateral = self._formation_weights(team)
+            for state in states.values():
+                base = state.base_offset_local
+                target = base.copy()
+                lateral = normalized_lateral.get(state.unit_id, 0.0)
+                if maneuver == "LEFT_ADVANCE":
+                    target.x += max(0.0, -lateral) * FORMATION_ADVANCE_DISTANCE
+                elif maneuver == "RIGHT_ADVANCE":
+                    target.x += max(0.0, lateral) * FORMATION_ADVANCE_DISTANCE
+                elif maneuver == "CENTER_BREAK":
+                    target.x += max(0.0, 1.0 - abs(lateral)) * FORMATION_ADVANCE_DISTANCE
+                elif maneuver == "ENCIRCLE":
+                    flank = abs(lateral)
+                    target.x += flank * FORMATION_ENCIRCLE_FORWARD_DISTANCE
+                    target.y += lateral * FORMATION_ENCIRCLE_LATERAL_DISTANCE
+                state.target_offset_local = target
+
+    def _update_formation_state(self, dt):
+        response = clamp(FORMATION_ANCHOR_RESPONSE * dt, 0.0, 1.0)
+        for states in self.team_formation_units.values():
+            for state in states.values():
+                state.current_offset_local = state.current_offset_local.lerp(state.target_offset_local, response)
+
+    def _update_formation_origins(self, dt):
+        red_origin = self.team_formation_origin[TEAM_RED]
+        blue_origin = self.team_formation_origin[TEAM_BLUE]
+        minimum_gap = FORMATION_ENGAGEMENT_GAP
+        for team, opposing_origin in ((TEAM_RED, blue_origin), (TEAM_BLUE, red_origin)):
+            origin = self.team_formation_origin[team]
+            forward, _ = self._army_basis(team)
+            remaining = (opposing_origin.x - origin.x) * forward.x
+            if remaining <= minimum_gap:
+                continue
+            origin += forward * min(FORMATION_ORIGIN_ADVANCE_SPEED * dt, remaining - minimum_gap)
+            self.team_formation_origin[team] = origin
+
+    def _formation_anchor_for(self, team, unit_id, formation_origin=None):
+        state = self.team_formation_units.get(team, {}).get(unit_id)
+        if state is None:
+            return formation_origin if formation_origin is not None else self.team_formation_origin[team]
+        if formation_origin is None:
+            formation_origin = self.team_formation_origin[team]
+        forward, right = self._army_basis(team)
+        return formation_origin + forward * state.current_offset_local.x + right * state.current_offset_local.y
+
+    def _formation_vector_for_agent(self, agent, local_enemies):
+        if agent.retreating or agent.formation_unit_id is None:
+            return pygame.Vector2()
+        anchor = self._formation_anchor_for(agent.team, agent.formation_unit_id)
+        forward, right = self._army_basis(agent.team)
+        desired = anchor + forward * agent.formation_slot_local.x + right * agent.formation_slot_local.y
+        error = desired - agent.pos
+        distance = error.length()
+        if distance <= FORMATION_TOLERANCE:
+            return pygame.Vector2()
+        strength = min(FORMATION_MAX_CORRECTION, (distance - FORMATION_TOLERANCE) * 0.04 * FORMATION_CORRECTION_STRENGTH)
+        if agent.target is not None and agent.target.alive:
+            if agent.pos.distance_squared_to(agent.target.pos) <= (self.common_config.melee_range * 3.0) ** 2:
+                strength *= FORMATION_COMBAT_STRENGTH
+        elif local_enemies > 0:
+            strength *= 0.7
+        return safe_normalize(error) * strength
 
     def _activate_maneuver(self, team: int, command: str | None):
         if command not in MANEUVER_COMMANDS and command is not None:
@@ -316,97 +518,12 @@ class BattleSimulation:
                     self.team_stance[team] = None
                     self.stance_turns_remaining[team] = 0.0
 
-    def _team_center_for(self, team: int):
-        red_center, blue_center = self._team_centers()
-        return red_center if team == TEAM_RED else blue_center
-
-    def _enemy_center_for(self, team: int):
-        red_center, blue_center = self._team_centers()
-        return blue_center if team == TEAM_RED else red_center
-
-    def _wing_for_agent(self, agent: "Agent", team_center: pygame.Vector2, team: int):
-        if team == TEAM_RED:
-            return "left" if agent.pos.y < team_center.y else "right"
-        return "left" if agent.pos.y > team_center.y else "right"
-
     def _team_offensive_multiplier(self, team: int, is_outgoing: bool):
         stance = self.team_stance.get(team)
         if stance == "CHARGE":
             return 1.25 if is_outgoing else 1.20
         if stance == "DEFENSE":
             return 0.80 if is_outgoing else 0.75
-        return 1.0
-
-    def _order_vector_for_agent(self, agent: "Agent", red_center: pygame.Vector2, blue_center: pygame.Vector2):
-        team = agent.team
-        if agent.retreating:
-            return pygame.Vector2()
-
-        team_center = red_center if team == TEAM_RED else blue_center
-        enemy_center = blue_center if team == TEAM_RED else red_center
-        maneuver = self.team_maneuver.get(team)
-        if maneuver is None:
-            return pygame.Vector2()
-
-        base_vec = safe_normalize(enemy_center - agent.pos)
-        wing = self._wing_for_agent(agent, team_center, team)
-        order_vec = pygame.Vector2()
-
-        if maneuver == "LEFT_ADVANCE":
-            if wing == "left":
-                order_vec += base_vec * 1.6
-        elif maneuver == "RIGHT_ADVANCE":
-            if wing == "right":
-                order_vec += base_vec * 1.6
-        elif maneuver == "CENTER_BREAK":
-            if abs(agent.pos.y - team_center.y) < CENTER_BAND:
-                order_vec += base_vec * 1.8
-                order_vec += base_vec * (0.4 + agent.aggression)
-        elif maneuver == "ENCIRCLE":
-            is_center = abs(agent.pos.y - team_center.y) < CENTER_BAND
-            if is_center:
-                return pygame.Vector2()
-
-            if agent.pos.y < team_center.y - CENTER_BAND:
-                flank_target = enemy_center + pygame.Vector2(0.0, -ENCIRCLE_OFFSET)
-                order_vec += safe_normalize(flank_target - agent.pos) * ENCIRCLE_STRENGTH
-            elif agent.pos.y > team_center.y + CENTER_BAND:
-                flank_target = enemy_center + pygame.Vector2(0.0, ENCIRCLE_OFFSET)
-                order_vec += safe_normalize(flank_target - agent.pos) * ENCIRCLE_STRENGTH
-
-        return order_vec
-
-    def _maneuver_speed_multiplier(
-        self,
-        agent: "Agent",
-        red_center: pygame.Vector2,
-        blue_center: pygame.Vector2,
-        retreating: bool,
-    ):
-        if retreating:
-            return 1.0
-
-        maneuver = self.team_maneuver.get(agent.team)
-        if maneuver is None:
-            return 1.0
-
-        team_center = red_center if agent.team == TEAM_RED else blue_center
-        if maneuver == "LEFT_ADVANCE":
-            wing = self._wing_for_agent(agent, team_center, agent.team)
-            return MAIN_ATTACK_SPEED_MULTIPLIER if wing == "left" else SUPPORT_SPEED_MULTIPLIER
-
-        if maneuver == "RIGHT_ADVANCE":
-            wing = self._wing_for_agent(agent, team_center, agent.team)
-            return MAIN_ATTACK_SPEED_MULTIPLIER if wing == "right" else SUPPORT_SPEED_MULTIPLIER
-
-        if maneuver == "CENTER_BREAK":
-            is_center = abs(agent.pos.y - team_center.y) < CENTER_BAND
-            return MAIN_ATTACK_SPEED_MULTIPLIER if is_center else SUPPORT_SPEED_MULTIPLIER
-
-        if maneuver == "ENCIRCLE":
-            is_center = abs(agent.pos.y - team_center.y) < CENTER_BAND
-            return ENCIRCLE_CENTER_SPEED_MULTIPLIER if is_center else ENCIRCLE_FLANK_SPEED_MULTIPLIER
-
         return 1.0
 
     def _effective_damage_multiplier(self, team: int, is_outgoing: bool):
@@ -416,20 +533,22 @@ class BattleSimulation:
         self.grid = SpatialGrid(self.common_config.cell_size)
         self.agents.clear()
         self.dead_positions.clear()
+        self.team_formation_units = {TEAM_RED: {}, TEAM_BLUE: {}}
+        self.team_formation_origin = {TEAM_RED: pygame.Vector2(), TEAM_BLUE: pygame.Vector2()}
         self._clear_team_orders()
         self.elapsed = 0.0
         self._spawn_army(
             TEAM_RED,
-            center_x=130,
-            center_y=WORLD_HEIGHT / 2,
+            center_x=LOGICAL_WORLD_WIDTH * INITIAL_ARMY_X_RATIO,
+            center_y=LOGICAL_WORLD_HEIGHT / 2,
             facing=1,
             team_size=self.common_config.red_team_size,
             formation_name=self.initial_formation,
         )
         self._spawn_army(
             TEAM_BLUE,
-            center_x=WORLD_WIDTH - 130,
-            center_y=WORLD_HEIGHT / 2,
+            center_x=LOGICAL_WORLD_WIDTH * (1.0 - INITIAL_ARMY_X_RATIO),
+            center_y=LOGICAL_WORLD_HEIGHT / 2,
             facing=-1,
             team_size=self.common_config.blue_team_size,
             formation_name=self.initial_formation,
@@ -437,73 +556,57 @@ class BattleSimulation:
         self.grid.rebuild(self.agents)
 
     def _band_counts_for_total(self, total: int):
-        ratios = (0.30, 0.40, 0.30)
-        counts = [int(round(total * ratio)) for ratio in ratios]
+        return self._formation_counts(total, THREE_BAND_FORMATION.units)
+
+    def _formation_counts(self, total, unit_specs):
+        counts = [int(round(total * spec.population_ratio)) for spec in unit_specs]
         while sum(counts) < total:
-            counts[1] += 1
+            counts[max(range(len(counts)), key=lambda index: unit_specs[index].population_ratio)] += 1
         while sum(counts) > total:
-            for index in (1, 0, 2):
+            for index in reversed(range(len(counts))):
                 if counts[index] > 0:
                     counts[index] -= 1
                     break
         return counts
 
-    def _spawn_single_block_formation(self, team, center_x, center_y, facing, team_size):
-        cols = max(5, min(25, math.ceil(math.sqrt(team_size))))
-        rows = math.ceil(team_size / cols)
+    def _spawn_formation(self, team, center_x, center_y, facing, team_size, formation_name):
+        definition = self._formation_definition(formation_name)
+        self._initialize_formation_units(team, definition.name)
+        center = pygame.Vector2(center_x, center_y)
+        self.team_formation_origin[team] = center.copy()
+        forward, right = self._army_basis(team)
+        counts = self._formation_counts(team_size, definition.units)
+        config = self.red_config if team == TEAM_RED else self.blue_config
         spacing_x = 6.0
         spacing_y = 6.0
-        count = 0
-
-        for row in range(rows):
-            for col in range(cols):
-                if count >= team_size:
-                    return
-                x = center_x - facing * (row - rows / 2) * spacing_x
-                y = center_y + (col - cols / 2) * spacing_y
-                x += random.uniform(-0.5, 0.5)
-                y += random.uniform(-0.5, 0.5)
-                config = self.red_config if team == TEAM_RED else self.blue_config
-                self.agents.append(Agent(team, x, y, config))
-                count += 1
-
-    def _spawn_three_band_formation(self, team, center_x, center_y, facing, team_size):
-        band_counts = self._band_counts_for_total(team_size)
-        band_centers = (
-            center_y - WORLD_HEIGHT * 0.22,
-            center_y,
-            center_y + WORLD_HEIGHT * 0.22,
-        )
-        spacing_x = 6.0
-        spacing_y = 6.0
-        count = 0
-
-        for band_index, band_count in enumerate(band_counts):
-            if band_count <= 0:
+        for spec, unit_count in zip(definition.units, counts):
+            if unit_count <= 0:
                 continue
-            band_center = band_centers[band_index]
-            cols = max(3, min(12, math.ceil(math.sqrt(band_count))))
-            rows = math.ceil(band_count / cols)
+            unit_state = self.team_formation_units[team][spec.unit_id]
+            anchor = center + forward * unit_state.base_offset_local.x + right * unit_state.base_offset_local.y
+            cols = max(3, min(25, math.ceil(math.sqrt(unit_count))))
+            rows = math.ceil(unit_count / cols)
             for row in range(rows):
                 for col in range(cols):
-                    if count >= team_size:
-                        return
-                    if (row * cols + col) >= band_count:
+                    if (row * cols + col) >= unit_count:
                         continue
-                    x = center_x - facing * (row - rows / 2) * spacing_x
-                    y = band_center + (col - cols / 2) * spacing_y
-                    x += random.uniform(-0.5, 0.5)
-                    y += random.uniform(-0.5, 0.5)
-                    config = self.red_config if team == TEAM_RED else self.blue_config
-                    self.agents.append(Agent(team, x, y, config))
-                    count += 1
+                    local_forward = -(row - rows / 2) * spacing_x + random.uniform(-0.5, 0.5)
+                    local_lateral = (col - cols / 2) * spacing_y + random.uniform(-0.5, 0.5)
+                    position = anchor + forward * local_forward + right * local_lateral
+                    agent = Agent(team, position.x, position.y, config)
+                    agent.formation_unit_id = spec.unit_id
+                    agent.formation_slot_local = pygame.Vector2(local_forward, local_lateral)
+                    self.agents.append(agent)
+
+    def _spawn_single_block_formation(self, team, center_x, center_y, facing, team_size):
+        self._spawn_formation(team, center_x, center_y, facing, team_size, "SINGLE_BLOCK")
+
+    def _spawn_three_band_formation(self, team, center_x, center_y, facing, team_size):
+        self._spawn_formation(team, center_x, center_y, facing, team_size, "THREE_BAND")
 
     def _spawn_army(self, team, center_x, center_y, facing, team_size, formation_name=None):
         formation_name = formation_name or self.initial_formation
-        if formation_name == "SINGLE_BLOCK":
-            self._spawn_single_block_formation(team, center_x, center_y, facing, team_size)
-            return
-        self._spawn_three_band_formation(team, center_x, center_y, facing, team_size)
+        self._spawn_formation(team, center_x, center_y, facing, team_size, formation_name)
 
     def alive_counts(self):
         red = 0
@@ -523,7 +626,9 @@ class BattleSimulation:
 
         # Enemy centers are only a coarse strategic bias. Individual decisions
         # still come from local sensing.
-        red_center, blue_center = self._team_centers()
+        self._update_formation_origins(dt)
+        self._update_formation_targets()
+        self._update_formation_state(dt)
 
         for agent in self.agents:
             if not agent.alive:
@@ -538,11 +643,17 @@ class BattleSimulation:
                 agent.retarget_timer = random.uniform(0.18, 0.42)
 
             local_state = self._local_tactical_state(agent)
-            move = self._movement_vector(agent, red_center, blue_center, local_state.allies, local_state.enemies, local_state)
+            move = self._movement_vector(
+                agent,
+                self.team_formation_origin[TEAM_RED],
+                self.team_formation_origin[TEAM_BLUE],
+                local_state.allies,
+                local_state.enemies,
+                local_state,
+            )
 
             if move.length_squared() > 1e-9:
-                speed_multiplier = self._maneuver_speed_multiplier(agent, red_center, blue_center, agent.retreating)
-                desired = safe_normalize(move) * agent.speed * speed_multiplier
+                desired = safe_normalize(move) * agent.speed
                 # Smooth acceleration instead of instant direction changes.
                 response = clamp(7.0 * dt, 0.0, 1.0)
                 agent.vel = agent.vel.lerp(desired, response)
@@ -553,8 +664,8 @@ class BattleSimulation:
                 agent.forward = agent.vel.normalize()
 
             agent.pos += agent.vel * dt
-            agent.pos.x = clamp(agent.pos.x, 8, WORLD_WIDTH - 8)
-            agent.pos.y = clamp(agent.pos.y, 8, WORLD_HEIGHT - 8)
+            agent.pos.x = clamp(agent.pos.x, 8, LOGICAL_WORLD_WIDTH - 8)
+            agent.pos.y = clamp(agent.pos.y, 8, LOGICAL_WORLD_HEIGHT - 8)
 
         # Resolve combat in a second pass so every agent decides against the same
         # world state before any damage is applied. This removes per-frame update
@@ -611,8 +722,8 @@ class BattleSimulation:
                 by += a.pos.y
                 bc += 1
 
-        red_center = pygame.Vector2(rx / rc, ry / rc) if rc else pygame.Vector2(WORLD_WIDTH * 0.25, WORLD_HEIGHT / 2)
-        blue_center = pygame.Vector2(bx / bc, by / bc) if bc else pygame.Vector2(WORLD_WIDTH * 0.75, WORLD_HEIGHT / 2)
+        red_center = pygame.Vector2(rx / rc, ry / rc) if rc else pygame.Vector2(LOGICAL_WORLD_WIDTH * 0.25, LOGICAL_WORLD_HEIGHT / 2)
+        blue_center = pygame.Vector2(bx / bc, by / bc) if bc else pygame.Vector2(LOGICAL_WORLD_WIDTH * 0.75, LOGICAL_WORLD_HEIGHT / 2)
         return red_center, blue_center
 
     def _acquire_target(self, agent: Agent):
@@ -663,18 +774,44 @@ class BattleSimulation:
                     allies += 1
 
         sector_counts = [0] * ENCIRCLEMENT_SECTORS
+        front_enemies = rear_enemies = left_enemies = right_enemies = 0
         for enemy in enemies:
             rel = enemy.pos - agent_pos
             rel_length_sq = rel.length_squared()
             if rel_length_sq <= 1e-9:
                 continue
+            enemy_dir = rel / math.sqrt(rel_length_sq)
+            forward_dot = agent_forward.dot(enemy_dir)
+            if forward_dot > 0.5:
+                front_enemies += 1
+            elif forward_dot < -0.5:
+                rear_enemies += 1
+            elif agent_forward.x * enemy_dir.y - agent_forward.y * enemy_dir.x >= 0.0:
+                left_enemies += 1
+            else:
+                right_enemies += 1
             relative_angle = math.atan2(rel.y, rel.x) - forward_angle
             sector = int((relative_angle + math.pi) / sector_step) % ENCIRCLEMENT_SECTORS
             sector_counts[sector] += 1
 
-        enemy_direction_count = sum(1 for count in sector_counts if count > 0)
+        enemy_direction_count = sum(
+            1 for count in sector_counts if count >= MIN_ENEMIES_PER_ENCIRCLEMENT_SECTOR
+        )
         encirclement_ratio = enemy_direction_count / float(ENCIRCLEMENT_SECTORS)
-        return LocalSituation(allies, len(enemies), enemy_direction_count, encirclement_ratio)
+        encirclement_pressure = _calculate_encirclement_pressure(
+            front_enemies, rear_enemies, left_enemies, right_enemies
+        )
+        return LocalSituation(
+            allies,
+            len(enemies),
+            enemy_direction_count,
+            encirclement_ratio,
+            front_enemies,
+            rear_enemies,
+            left_enemies,
+            right_enemies,
+            encirclement_pressure,
+        )
 
     def _local_balance(self, agent: Agent):
         local_state = self._local_tactical_state(agent)
@@ -692,7 +829,8 @@ class BattleSimulation:
                 continue
             nearby_enemies.append(other)
 
-        home_target = pygame.Vector2(65.0 if agent.team == TEAM_RED else WORLD_WIDTH - 65.0, WORLD_HEIGHT / 2.0)
+        home_x = LOGICAL_WORLD_WIDTH * HOME_X_RATIO if agent.team == TEAM_RED else LOGICAL_WORLD_WIDTH * (1.0 - HOME_X_RATIO)
+        home_target = pygame.Vector2(home_x, LOGICAL_WORLD_HEIGHT / 2.0)
         home_dir = safe_normalize(home_target - agent_pos)
         if not nearby_enemies:
             return home_dir if home_dir.length_squared() > 0.0 else safe_normalize(agent.forward)
@@ -726,7 +864,15 @@ class BattleSimulation:
 
         return best_dir if best_dir.length_squared() > 0.0 else home_dir
 
-    def _movement_vector(self, agent, red_center, blue_center, local_allies, local_enemies, local_state=None):
+    def _movement_vector(
+        self,
+        agent,
+        red_center,
+        blue_center,
+        local_allies,
+        local_enemies,
+        local_state=None,
+    ):
         separation = pygame.Vector2()
         separation_radius = self.common_config.separation_radius
         sep_r2 = separation_radius * separation_radius
@@ -748,24 +894,22 @@ class BattleSimulation:
                 target_vec = safe_normalize(delta)
             else:
                 target_vec = pygame.Vector2()
-        else:
-            strategic_target = blue_center if agent.team == TEAM_RED else red_center
-            target_vec = safe_normalize(strategic_target - agent.pos)
 
         # Low-courage agents retreat if locally overwhelmed, but multi-direction
         # pressure makes retreat far easier even without a large raw number gap.
         hp_ratio = agent.hp / agent.max_hp
         local_state = self._local_tactical_state(agent) if local_state is None else local_state
-        enemy_direction_count = local_state.enemy_direction_count
-        encirclement_ratio = local_state.encirclement_ratio
+        encirclement_pressure = local_state.encirclement_pressure
         outnumbered = local_enemies > max(2, local_allies * 1.55)
         badly_hurt = hp_ratio < (0.18 + (1.0 - agent.courage) * 0.22)
-        effective_courage_threshold = 0.55 + encirclement_ratio * 0.55
+        effective_courage_threshold = 0.55 + encirclement_pressure * 0.25
         retreat = (
             (outnumbered and agent.courage < effective_courage_threshold)
             or badly_hurt
-            or (enemy_direction_count >= 4 and agent.courage < 0.85 - 0.15 * encirclement_ratio)
-            or (enemy_direction_count >= 6 and agent.courage < 1.0)
+            or (
+                encirclement_pressure >= ENCIRCLEMENT_RETREAT_THRESHOLD
+                and agent.courage < ENCIRCLEMENT_COURAGE_THRESHOLD
+            )
         )
 
         if retreat:
@@ -783,7 +927,7 @@ class BattleSimulation:
             target_vec * (1.0 + 0.8 * agent.aggression)
             + separation * 105.0
             + lateral * wave * 0.18
-            + self._order_vector_for_agent(agent, red_center, blue_center)
+            + self._formation_vector_for_agent(agent, local_enemies)
         )
 
     def _collect_attack_event(self, agent: Agent, attack_events: list):
@@ -1028,7 +1172,7 @@ def draw_team_panel(screen, rect, title, color, fields, font, small_font, order_
     draw_order_state(screen, rect, team, sim, color, small_font)
 
 def draw_common_panel(screen, fields, font, small_font, status):
-    rect = pygame.Rect(0, WORLD_HEIGHT, WIDTH, BOTTOM_PANEL_HEIGHT)
+    rect = pygame.Rect(0, BATTLE_VIEW_HEIGHT, WIDTH, BOTTOM_PANEL_HEIGHT)
     pygame.draw.rect(screen, (17, 20, 24), rect)
     pygame.draw.line(screen, GRAY, rect.topleft, rect.topright, 2)
     screen.blit(font.render("COMMON PARAMETERS", True, WHITE), (12, rect.y + 10))
@@ -1049,39 +1193,40 @@ def draw_common_panel(screen, fields, font, small_font, status):
 
 
 def draw_world(screen, sim: BattleSimulation, font, small_font, show_grid):
-    world = pygame.Surface((WORLD_WIDTH, WORLD_HEIGHT))
+    world = pygame.Surface((BATTLE_VIEW_WIDTH, BATTLE_VIEW_HEIGHT))
     world.fill(BACKGROUND)
 
     if show_grid:
-        for x in range(0, WORLD_WIDTH, sim.common_config.cell_size):
-            pygame.draw.line(world, GRID_COLOR, (x, 0), (x, WORLD_HEIGHT), 1)
-        for y in range(0, WORLD_HEIGHT, sim.common_config.cell_size):
-            pygame.draw.line(world, GRID_COLOR, (0, y), (WORLD_WIDTH, y), 1)
+        for x in range(0, LOGICAL_WORLD_WIDTH + sim.common_config.cell_size, sim.common_config.cell_size):
+            x0 = world_to_view(pygame.Vector2(x, 0))
+            x1 = world_to_view(pygame.Vector2(x, LOGICAL_WORLD_HEIGHT))
+            pygame.draw.line(world, GRID_COLOR, (int(x0.x), int(x0.y)), (int(x1.x), int(x1.y)), 1)
+        for y in range(0, LOGICAL_WORLD_HEIGHT + sim.common_config.cell_size, sim.common_config.cell_size):
+            y0 = world_to_view(pygame.Vector2(0, y))
+            y1 = world_to_view(pygame.Vector2(LOGICAL_WORLD_WIDTH, y))
+            pygame.draw.line(world, GRID_COLOR, (int(y0.x), int(y0.y)), (int(y1.x), int(y1.y)), 1)
 
     # Dead agents are drawn first and dimmer.
     for a in sim.agents:
         if a.alive:
             continue
         color = RED_DARK if a.team == TEAM_RED else BLUE_DARK
-        pygame.draw.circle(world, color, (int(a.pos.x), int(a.pos.y)), max(1, a.radius))
+        view_pos = world_to_view(a.pos)
+        pygame.draw.circle(world, color, (int(view_pos.x), int(view_pos.y)), max(1, a.radius))
 
     # Living agents.
     for a in sim.agents:
         if not a.alive:
             continue
-        # Choose color: different when retreating
         if a.retreating:
             color = RED_RETREAT if a.team == TEAM_RED else BLUE_RETREAT
         else:
             color = RED if a.team == TEAM_RED else BLUE
-        # Draw agent as a triangle pointing in velocity direction.
-        # If velocity is very small, fall back to facing toward enemy side.
         if a.forward.length_squared() > 1e-6:
             orient = a.forward.normalize()
         else:
             orient = pygame.Vector2(1, 0) if a.team == TEAM_RED else pygame.Vector2(-1, 0)
 
-        # Triangle size based on composite strength across traits (3 tiers)
         cfg = sim.red_config if a.team == TEAM_RED else sim.blue_config
         keys = [
             "max_hp",
@@ -1098,7 +1243,6 @@ def draw_world(screen, sim: BattleSimulation, font, small_font, show_grid):
             v = getattr(a, k)
             rmin, rmax = cfg.values[k]
             if k == "attack_interval":
-                # lower is better -> invert
                 if rmax - rmin != 0:
                     n = 1.0 - (v - rmin) / (rmax - rmin)
                 else:
@@ -1110,7 +1254,6 @@ def draw_world(screen, sim: BattleSimulation, font, small_font, show_grid):
                     n = 0.0
             norms.append(clamp(n, 0.0, 1.0))
         strength = sum(norms) / len(norms) if norms else 0.0
-        # map to three tiers
         if strength >= 0.66:
             tier_scale = 1.6
         elif strength >= 0.33:
@@ -1119,17 +1262,17 @@ def draw_world(screen, sim: BattleSimulation, font, small_font, show_grid):
             tier_scale = 0.6
         base = max(1, int(a.radius * 3 * 0.5))
         size = max(1, int(base * tier_scale))
-        tip = a.pos + orient * (size * 0.9)
-        left = a.pos + orient.rotate(140) * size
-        right = a.pos + orient.rotate(-140) * size
+        view_pos = world_to_view(a.pos)
+        tip = view_pos + orient * (size * 0.9)
+        left = view_pos + orient.rotate(140) * size
+        right = view_pos + orient.rotate(-140) * size
         points = [(int(tip.x), int(tip.y)), (int(left.x), int(left.y)), (int(right.x), int(right.y))]
         pygame.draw.polygon(world, color, points)
 
     red, blue = sim.alive_counts()
     total = red + blue
 
-    # HUD
-    pygame.draw.rect(world, (10, 12, 14), (0, 0, WORLD_WIDTH, 42))
+    pygame.draw.rect(world, (10, 12, 14), (0, 0, BATTLE_VIEW_WIDTH, 42))
     world.blit(font.render(f"RED {red:4d}", True, RED), (12, 8))
     world.blit(font.render(f"BLUE {blue:4d}", True, BLUE), (140, 8))
     total_initial = sim.common_config.red_team_size + sim.common_config.blue_team_size
@@ -1137,12 +1280,12 @@ def draw_world(screen, sim: BattleSimulation, font, small_font, show_grid):
     world.blit(small_font.render(f"Time {sim.elapsed:6.1f}s", True, WHITE), (440, 14))
 
     controls = "SPACE pause   R reset   G grid   +/- simulation speed   ESC quit"
-    world.blit(small_font.render(controls, True, GRAY), (12, WORLD_HEIGHT - 22))
+    world.blit(small_font.render(controls, True, GRAY), (12, BATTLE_VIEW_HEIGHT - 22))
 
     if red == 0 or blue == 0:
         winner = "BLUE WINS" if red == 0 and blue > 0 else "RED WINS" if blue == 0 and red > 0 else "DRAW"
         text = font.render(winner + "   [R] restart", True, WHITE)
-        rect = text.get_rect(center=(WORLD_WIDTH // 2, 70))
+        rect = text.get_rect(center=(BATTLE_VIEW_WIDTH // 2, 70))
         pygame.draw.rect(world, (10, 12, 14), rect.inflate(30, 18))
         world.blit(text, rect)
     screen.blit(world, (PANEL_WIDTH, 0))
@@ -1173,22 +1316,22 @@ def main():
     common_fields = {
         # Positions aligned with labels: x = 12, 162, 312, 462
         "cell_size": InputField(
-            (12, WORLD_HEIGHT + 62, 120, 25),
+            (12, BATTLE_VIEW_HEIGHT + 62, 120, 25),
             common_config.cell_size,
             1,
         ),
         "separation_radius": InputField(
-            (162, WORLD_HEIGHT + 62, 120, 25),
+            (162, BATTLE_VIEW_HEIGHT + 62, 120, 25),
             common_config.separation_radius,
             1.0,
         ),
         "melee_range": InputField(
-            (312, WORLD_HEIGHT + 62, 120, 25),
+            (312, BATTLE_VIEW_HEIGHT + 62, 120, 25),
             common_config.melee_range,
             1.0,
         ),
         "local_balance_radius": InputField(
-            (462, WORLD_HEIGHT + 62, 120, 25),
+            (462, BATTLE_VIEW_HEIGHT + 62, 120, 25),
             common_config.local_balance_radius,
             5.0,
         ),
@@ -1205,13 +1348,13 @@ def main():
         name: pygame.Rect(WIDTH - PANEL_WIDTH + 12 + (index % 2) * 98, 420 + (index // 2) * 25, 96, 22)
         for index, name in enumerate(MANEUVER_COMMANDS + STANCE_COMMANDS)
     }
-    apply_rect = pygame.Rect(WIDTH - 135, WORLD_HEIGHT + 38, 120, 30)
+    apply_rect = pygame.Rect(WIDTH - 135, BATTLE_VIEW_HEIGHT + 38, 120, 30)
     # UI button rects (moved into common panel at bottom, right-aligned)
-    pause_rect = pygame.Rect(WIDTH - 320, WORLD_HEIGHT + 8, 60, 26)
-    reset_rect = pygame.Rect(WIDTH - 250, WORLD_HEIGHT + 8, 60, 26)
-    grid_rect = pygame.Rect(WIDTH - 180, WORLD_HEIGHT + 8, 60, 26)
-    speed_minus_rect = pygame.Rect(WORLD_WIDTH + PANEL_WIDTH - 140, WORLD_HEIGHT + 108, 22, 22)
-    speed_plus_rect = pygame.Rect(WORLD_WIDTH + PANEL_WIDTH - 90, WORLD_HEIGHT + 108, 22, 22)
+    pause_rect = pygame.Rect(WIDTH - 320, BATTLE_VIEW_HEIGHT + 8, 60, 26)
+    reset_rect = pygame.Rect(WIDTH - 250, BATTLE_VIEW_HEIGHT + 8, 60, 26)
+    grid_rect = pygame.Rect(WIDTH - 180, BATTLE_VIEW_HEIGHT + 8, 60, 26)
+    speed_minus_rect = pygame.Rect(BATTLE_VIEW_WIDTH + PANEL_WIDTH - 140, BATTLE_VIEW_HEIGHT + 108, 22, 22)
+    speed_plus_rect = pygame.Rect(BATTLE_VIEW_WIDTH + PANEL_WIDTH - 90, BATTLE_VIEW_HEIGHT + 108, 22, 22)
 
     while True:
         raw_dt = clock.tick(FPS) / 1000.0
@@ -1341,11 +1484,11 @@ def main():
         screen.blit(small_font.render("GRID", True, WHITE), (grid_rect.x + 18, grid_rect.y + 3))
         screen.blit(small_font.render("-", True, WHITE), (speed_minus_rect.x + 4, speed_minus_rect.y))
         screen.blit(small_font.render("+", True, WHITE), (speed_plus_rect.x + 4, speed_plus_rect.y))
-        screen.fill((12, 14, 17), (0, 0, PANEL_WIDTH, WORLD_HEIGHT))
-        screen.fill((12, 14, 17), (WIDTH - PANEL_WIDTH, 0, PANEL_WIDTH, WORLD_HEIGHT))
+        screen.fill((12, 14, 17), (0, 0, PANEL_WIDTH, BATTLE_VIEW_HEIGHT))
+        screen.fill((12, 14, 17), (WIDTH - PANEL_WIDTH, 0, PANEL_WIDTH, BATTLE_VIEW_HEIGHT))
         draw_team_panel(
             screen,
-            pygame.Rect(0, 0, PANEL_WIDTH, WORLD_HEIGHT),
+            pygame.Rect(0, 0, PANEL_WIDTH, BATTLE_VIEW_HEIGHT),
             "RED ARMY",
             RED,
             red_fields,
@@ -1358,7 +1501,7 @@ def main():
         )
         draw_team_panel(
             screen,
-            pygame.Rect(WIDTH - PANEL_WIDTH, 0, PANEL_WIDTH, WORLD_HEIGHT),
+            pygame.Rect(WIDTH - PANEL_WIDTH, 0, PANEL_WIDTH, BATTLE_VIEW_HEIGHT),
             "BLUE ARMY",
             BLUE,
             blue_fields,
@@ -1390,7 +1533,7 @@ def main():
         screen.blit(small_font.render("+", True, WHITE), (speed_plus_rect.x + 4, speed_plus_rect.y))
 
         speed_text = small_font.render(f"x{SIM_SPEED:.2f}  FPS {clock.get_fps():.0f}", True, GRAY)
-        screen.blit(speed_text, (WORLD_WIDTH + PANEL_WIDTH - 115, WORLD_HEIGHT + 112))
+        screen.blit(speed_text, (BATTLE_VIEW_WIDTH + PANEL_WIDTH - 115, BATTLE_VIEW_HEIGHT + 112))
 
         pygame.display.flip()
 

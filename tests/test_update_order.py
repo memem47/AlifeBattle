@@ -93,85 +93,119 @@ def test_attacks_are_resolved_simultaneously():
     assert red.hp <= 0 and blue.hp <= 0
 
 
-def test_maneuver_speed_rebalances_main_and_support_forces():
+def test_logical_world_is_separate_from_battle_view():
+    assert simmod.BATTLE_VIEW_WIDTH == 600
+    assert simmod.BATTLE_VIEW_HEIGHT == 600
+    assert simmod.LOGICAL_WORLD_WIDTH == 600
+    assert simmod.LOGICAL_WORLD_HEIGHT == 600
+    assert simmod.WORLD_WIDTH == simmod.LOGICAL_WORLD_WIDTH
+    assert simmod.WORLD_HEIGHT == simmod.LOGICAL_WORLD_HEIGHT
+    view_pos = simmod.world_to_view(pygame.Vector2(simmod.LOGICAL_WORLD_WIDTH, simmod.LOGICAL_WORLD_HEIGHT))
+    assert view_pos.x == pytest.approx(simmod.BATTLE_VIEW_WIDTH)
+    assert view_pos.y == pytest.approx(simmod.BATTLE_VIEW_HEIGHT)
+
+
+def test_agents_keep_persistent_formation_units_and_slots():
     sim, _, _, _ = _make_sim()
+    red_agents = [agent for agent in sim.agents if agent.team == simmod.TEAM_RED]
+    assert set(sim.team_formation_units[simmod.TEAM_RED]) == {"UNIT_0", "UNIT_1", "UNIT_2"}
+    assert {agent.formation_unit_id for agent in red_agents} <= {"UNIT_0", "UNIT_1", "UNIT_2"}
+    assert all(agent.formation_slot_local.length_squared() > 0.0 for agent in red_agents)
 
-    red_center = pygame.Vector2(150.0, 200.0)
-    blue_center = pygame.Vector2(550.0, 200.0)
 
-    left_agent = simmod.Agent(simmod.TEAM_RED, 110.0, 100.0, sim.red_config)
-    right_agent = simmod.Agent(simmod.TEAM_RED, 110.0, 300.0, sim.red_config)
-    center_agent = simmod.Agent(simmod.TEAM_RED, 150.0, 200.0, sim.red_config)
+def test_formation_origin_is_independent_of_agent_positions():
+    sim, _, _, _ = _make_sim()
+    origin = sim.team_formation_origin[simmod.TEAM_RED].copy()
+    for agent in sim.agents:
+        if agent.team == simmod.TEAM_RED:
+            agent.pos.xy = 600.0, 500.0
+
+    assert sim.team_formation_origin[simmod.TEAM_RED] == origin
+
+
+def test_agents_without_targets_follow_formation_instead_of_enemy_center():
+    sim, _, _, _ = _make_sim()
+    agent = sim.agents[0]
+    agent.target = None
+    agent.pos = sim.team_formation_origin[agent.team] + pygame.Vector2(-80.0, 0.0)
+    local_state = sim._local_tactical_state(agent, [])
+
+    move = sim._movement_vector(
+        agent,
+        sim.team_formation_origin[simmod.TEAM_RED],
+        sim.team_formation_origin[simmod.TEAM_BLUE],
+        local_state.allies,
+        local_state.enemies,
+        local_state,
+    )
+
+    assert move.x > 0.0
+
+
+def test_maneuvers_deform_generic_unit_targets():
+    sim, _, _, _ = _make_sim()
+    states = sim.team_formation_units[simmod.TEAM_RED]
+    base = {unit_id: state.target_offset_local.copy() for unit_id, state in states.items()}
 
     sim.team_maneuver[simmod.TEAM_RED] = "LEFT_ADVANCE"
-    assert sim._maneuver_speed_multiplier(left_agent, red_center, blue_center, retreating=False) == simmod.MAIN_ATTACK_SPEED_MULTIPLIER
-    assert sim._maneuver_speed_multiplier(right_agent, red_center, blue_center, retreating=False) == simmod.SUPPORT_SPEED_MULTIPLIER
-
-    sim.team_maneuver[simmod.TEAM_RED] = "RIGHT_ADVANCE"
-    assert sim._maneuver_speed_multiplier(right_agent, red_center, blue_center, retreating=False) == simmod.MAIN_ATTACK_SPEED_MULTIPLIER
-    assert sim._maneuver_speed_multiplier(left_agent, red_center, blue_center, retreating=False) == simmod.SUPPORT_SPEED_MULTIPLIER
+    sim._update_formation_targets()
+    assert states["UNIT_0"].target_offset_local.x > base["UNIT_0"].x
+    assert states["UNIT_1"].target_offset_local == base["UNIT_1"]
+    assert states["UNIT_2"].target_offset_local == base["UNIT_2"]
 
     sim.team_maneuver[simmod.TEAM_RED] = "CENTER_BREAK"
-    assert sim._maneuver_speed_multiplier(center_agent, red_center, blue_center, retreating=False) == simmod.MAIN_ATTACK_SPEED_MULTIPLIER
-    assert sim._maneuver_speed_multiplier(left_agent, red_center, blue_center, retreating=False) == simmod.SUPPORT_SPEED_MULTIPLIER
+    sim._update_formation_targets()
+    assert states["UNIT_1"].target_offset_local.x > states["UNIT_0"].target_offset_local.x
+    assert states["UNIT_1"].target_offset_local.x > states["UNIT_2"].target_offset_local.x
 
     sim.team_maneuver[simmod.TEAM_RED] = "ENCIRCLE"
-    assert sim._maneuver_speed_multiplier(center_agent, red_center, blue_center, retreating=False) == simmod.ENCIRCLE_CENTER_SPEED_MULTIPLIER
-    assert sim._maneuver_speed_multiplier(left_agent, red_center, blue_center, retreating=False) == simmod.ENCIRCLE_FLANK_SPEED_MULTIPLIER
+    sim._update_formation_targets()
+    assert states["UNIT_0"].target_offset_local.y < base["UNIT_0"].y
+    assert states["UNIT_2"].target_offset_local.y > base["UNIT_2"].y
+    assert states["UNIT_1"].target_offset_local == base["UNIT_1"]
 
-    left_agent.retreating = True
-    assert sim._maneuver_speed_multiplier(left_agent, red_center, blue_center, retreating=True) == 1.0
 
-
-def test_encircle_order_vector_stays_on_flanks_and_not_center():
+def test_encircle_lateral_offsets_stay_in_pixel_coordinates():
     sim, _, _, _ = _make_sim()
-    red_center = pygame.Vector2(150.0, 200.0)
-    blue_center = pygame.Vector2(550.0, 200.0)
-    center_agent = simmod.Agent(simmod.TEAM_RED, 150.0, 200.0, sim.red_config)
-    upper_agent = simmod.Agent(simmod.TEAM_RED, 150.0, 120.0, sim.red_config)
-    lower_agent = simmod.Agent(simmod.TEAM_RED, 150.0, 280.0, sim.red_config)
+    states = sim.team_formation_units[simmod.TEAM_RED]
+
+    assert states["UNIT_0"].base_offset_local.y == pytest.approx(-simmod.FORMATION_LATERAL_SPACING)
+    assert states["UNIT_2"].base_offset_local.y == pytest.approx(simmod.FORMATION_LATERAL_SPACING)
 
     sim.team_maneuver[simmod.TEAM_RED] = "ENCIRCLE"
-    center_vec = sim._order_vector_for_agent(center_agent, red_center, blue_center)
-    upper_vec = sim._order_vector_for_agent(upper_agent, red_center, blue_center)
-    lower_vec = sim._order_vector_for_agent(lower_agent, red_center, blue_center)
+    sim._update_formation_targets()
 
-    assert center_vec.length_squared() == 0.0
-    assert upper_vec.x > 0.0
-    assert lower_vec.x > 0.0
-    assert upper_vec.y <= 0.0
-    assert lower_vec.y >= 0.0
+    assert states["UNIT_0"].target_offset_local.y == pytest.approx(
+        -simmod.FORMATION_LATERAL_SPACING - simmod.FORMATION_ENCIRCLE_LATERAL_DISTANCE
+    )
+    assert states["UNIT_2"].target_offset_local.y == pytest.approx(
+        simmod.FORMATION_LATERAL_SPACING + simmod.FORMATION_ENCIRCLE_LATERAL_DISTANCE
+    )
 
 
-def test_red_blue_maneuver_rules_are_symmetric():
+def test_formation_maneuvers_are_mirrored_in_army_local_coordinates():
     sim, _, _, _ = _make_sim()
-    red_center = pygame.Vector2(150.0, 200.0)
-    blue_center = pygame.Vector2(550.0, 200.0)
-
-    red_left = simmod.Agent(simmod.TEAM_RED, 110.0, 180.0, sim.red_config)
-    red_right = simmod.Agent(simmod.TEAM_RED, 110.0, 220.0, sim.red_config)
-    blue_upper = simmod.Agent(simmod.TEAM_BLUE, 590.0, 180.0, sim.blue_config)
-    blue_lower = simmod.Agent(simmod.TEAM_BLUE, 590.0, 220.0, sim.blue_config)
-
     sim.team_maneuver[simmod.TEAM_RED] = "LEFT_ADVANCE"
     sim.team_maneuver[simmod.TEAM_BLUE] = "LEFT_ADVANCE"
+    sim._update_formation_targets()
+    red_left = sim.team_formation_units[simmod.TEAM_RED]["UNIT_0"].target_offset_local.x
+    blue_left = sim.team_formation_units[simmod.TEAM_BLUE]["UNIT_0"].target_offset_local.x
+    assert red_left == pytest.approx(blue_left)
 
-    red_left_mult = sim._maneuver_speed_multiplier(red_left, red_center, blue_center, retreating=False)
-    red_right_mult = sim._maneuver_speed_multiplier(red_right, red_center, blue_center, retreating=False)
-    blue_upper_mult = sim._maneuver_speed_multiplier(blue_upper, red_center, blue_center, retreating=False)
-    blue_lower_mult = sim._maneuver_speed_multiplier(blue_lower, red_center, blue_center, retreating=False)
 
-    assert red_left_mult == simmod.MAIN_ATTACK_SPEED_MULTIPLIER
-    assert red_right_mult == simmod.SUPPORT_SPEED_MULTIPLIER
-    assert blue_upper_mult == simmod.SUPPORT_SPEED_MULTIPLIER
-    assert blue_lower_mult == simmod.MAIN_ATTACK_SPEED_MULTIPLIER
-
+def test_five_unit_definition_uses_same_controller():
+    sim, _, _, _ = _make_sim()
+    five_band = simmod.FormationDefinition(
+        "FIVE_BAND",
+        tuple(simmod.FormationUnitSpec(f"UNIT_{index}", 0.2, 0.0, offset) for index, offset in enumerate((-1.0, -0.5, 0.0, 0.5, 1.0))),
+    )
+    simmod.FORMATION_DEFINITIONS["FIVE_BAND"] = five_band
+    sim.agents.clear()
+    sim._spawn_army(simmod.TEAM_RED, 130.0, simmod.WORLD_HEIGHT / 2, 1, 20, "FIVE_BAND")
     sim.team_maneuver[simmod.TEAM_RED] = "RIGHT_ADVANCE"
-    sim.team_maneuver[simmod.TEAM_BLUE] = "RIGHT_ADVANCE"
-    assert sim._maneuver_speed_multiplier(red_left, red_center, blue_center, retreating=False) == simmod.SUPPORT_SPEED_MULTIPLIER
-    assert sim._maneuver_speed_multiplier(red_right, red_center, blue_center, retreating=False) == simmod.MAIN_ATTACK_SPEED_MULTIPLIER
-    assert sim._maneuver_speed_multiplier(blue_upper, red_center, blue_center, retreating=False) == simmod.MAIN_ATTACK_SPEED_MULTIPLIER
-    assert sim._maneuver_speed_multiplier(blue_lower, red_center, blue_center, retreating=False) == simmod.SUPPORT_SPEED_MULTIPLIER
+    sim._update_formation_targets()
+    assert len(sim.team_formation_units[simmod.TEAM_RED]) == 5
+    assert sim.team_formation_units[simmod.TEAM_RED]["UNIT_4"].target_offset_local.x > sim.team_formation_units[simmod.TEAM_RED]["UNIT_0"].target_offset_local.x
 
 
 def test_initial_formation_is_split_into_three_vertical_bands():
@@ -259,6 +293,70 @@ def test_enemy_direction_count_distinguishes_front_from_multi_direction_encircle
     ]
 
     local = sim._local_tactical_state(agent, enemies)
-    assert local.enemy_direction_count >= 3
-    assert local.encirclement_ratio > 0.0
+    assert local.enemy_direction_count == 1
+    assert local.front_enemies == 2
+    assert local.rear_enemies == 0
+    assert local.encirclement_pressure == 0.0
     assert local.enemy_direction_count <= simmod.ENCIRCLEMENT_SECTORS
+
+
+def test_encirclement_pressure_requires_rear_and_dense_regions():
+    assert simmod._calculate_encirclement_pressure(8, 0, 0, 0) == 0.0
+    assert simmod._calculate_encirclement_pressure(8, 2, 0, 0) == pytest.approx(0.50)
+    assert simmod._calculate_encirclement_pressure(0, 2, 0, 2) == pytest.approx(0.45)
+    assert simmod._calculate_encirclement_pressure(2, 2, 2, 2) == pytest.approx(1.0)
+
+    sim, _, _, _ = _make_sim()
+    agent = simmod.Agent(simmod.TEAM_RED, 100.0, 100.0, sim.red_config)
+    agent.forward = pygame.Vector2(1.0, 0.0)
+    enemies = [
+        simmod.Agent(simmod.TEAM_BLUE, 125.0, 100.0, sim.blue_config),
+        simmod.Agent(simmod.TEAM_BLUE, 125.0, 100.0, sim.blue_config),
+        simmod.Agent(simmod.TEAM_BLUE, 75.0, 100.0, sim.blue_config),
+        simmod.Agent(simmod.TEAM_BLUE, 75.0, 100.0, sim.blue_config),
+        simmod.Agent(simmod.TEAM_BLUE, 100.0, 125.0, sim.blue_config),
+        simmod.Agent(simmod.TEAM_BLUE, 100.0, 125.0, sim.blue_config),
+        simmod.Agent(simmod.TEAM_BLUE, 100.0, 75.0, sim.blue_config),
+        simmod.Agent(simmod.TEAM_BLUE, 100.0, 75.0, sim.blue_config),
+    ]
+
+    local = sim._local_tactical_state(agent, enemies)
+    assert local.enemy_direction_count == 4
+    assert (local.front_enemies, local.rear_enemies) == (2, 2)
+    assert (local.left_enemies, local.right_enemies) == (2, 2)
+    assert local.encirclement_pressure == pytest.approx(1.0)
+
+
+def test_frontal_pressure_does_not_trigger_retreat_but_encirclement_does():
+    sim, _, _, _ = _make_sim()
+    agent = simmod.Agent(simmod.TEAM_RED, 350.0, 200.0, sim.red_config)
+    agent.forward = pygame.Vector2(1.0, 0.0)
+    agent.courage = 0.5
+    agent.hp = agent.max_hp
+
+    allies = [simmod.Agent(simmod.TEAM_RED, 325.0, 180.0 + i * 8.0, sim.red_config) for i in range(5)]
+    frontal_enemies = [simmod.Agent(simmod.TEAM_BLUE, 375.0, 180.0 + i * 8.0, sim.blue_config) for i in range(6)]
+    sim.agents = [agent, *allies, *frontal_enemies]
+    sim.grid.rebuild(sim.agents)
+    frontal_state = sim._local_tactical_state(agent)
+    sim._movement_vector(agent, pygame.Vector2(300.0, 200.0), pygame.Vector2(400.0, 200.0),
+                         frontal_state.allies, frontal_state.enemies, frontal_state)
+    assert frontal_state.encirclement_pressure == 0.0
+    assert agent.retreating is False
+
+    encircled_enemies = []
+    for x, y in ((375.0, 200.0), (375.0, 203.0), (325.0, 200.0), (325.0, 197.0),
+                 (350.0, 225.0), (353.0, 225.0), (350.0, 175.0), (353.0, 175.0)):
+        encircled_enemies.append(simmod.Agent(simmod.TEAM_BLUE, x, y, sim.blue_config))
+    sim.agents = [agent, *allies, *encircled_enemies]
+    sim.grid.rebuild(sim.agents)
+    encircled_state = sim._local_tactical_state(agent)
+    sim._movement_vector(agent, pygame.Vector2(300.0, 200.0), pygame.Vector2(400.0, 200.0),
+                         encircled_state.allies, encircled_state.enemies, encircled_state)
+    assert encircled_state.encirclement_pressure == pytest.approx(1.0)
+    assert agent.retreating is True
+
+    agent.courage = 0.95
+    sim._movement_vector(agent, pygame.Vector2(300.0, 200.0), pygame.Vector2(400.0, 200.0),
+                         encircled_state.allies, encircled_state.enemies, encircled_state)
+    assert agent.retreating is False
